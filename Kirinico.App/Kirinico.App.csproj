@@ -1,0 +1,38 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Kirinico.Core\Kirinico.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <Version>1.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <AutoFileVersionBuild>$([System.DateTime]::UtcNow.ToString("MMdd"))</AutoFileVersionBuild>
+    <AutoFileVersionRevision>$([System.DateTime]::UtcNow.ToString("HHmm"))</AutoFileVersionRevision>
+    <FileVersion>1.0.$(AutoFileVersionBuild).$(AutoFileVersionRevision)</FileVersion>
+    <InformationalVersion>1.0</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\ToolbarIcons\*.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\Cursors\*.cur">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

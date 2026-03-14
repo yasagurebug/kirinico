@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Kirinico.App/Kirinico.App.csproj" />
+  <Project Path="Kirinico.Core.Tests/Kirinico.Core.Tests.csproj" />
+  <Project Path="Kirinico.Core/Kirinico.Core.csproj" />
+</Solution>

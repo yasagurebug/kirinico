@@ -1,0 +1,63 @@
+<UserControl x:Class="Kirinico.App.Controls.ZoomPanImageViewer"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="Root">
+    <Border Background="{Binding ViewerBackground, ElementName=Root}"
+            BorderBrush="#2F3B46"
+            BorderThickness="1"
+            CornerRadius="8"
+            SnapsToDevicePixels="True">
+        <Grid>
+            <ScrollViewer x:Name="ViewerScroll"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto"
+                          PanningMode="Both"
+                          PreviewMouseWheel="OnPreviewMouseWheel"
+                          ScrollChanged="OnScrollChanged"
+                          PreviewMouseDown="OnPreviewMouseDown"
+                          PreviewMouseMove="OnPreviewMouseMove"
+                          PreviewMouseUp="OnPreviewMouseUp"
+                          MouseLeave="OnMouseLeave">
+                <Grid x:Name="ContentHost"
+                      SnapsToDevicePixels="True">
+                    <Grid.LayoutTransform>
+                        <ScaleTransform x:Name="ContentScale" />
+                    </Grid.LayoutTransform>
+                    <Image x:Name="BaseImage"
+                           Source="{Binding Source, ElementName=Root}"
+                           Stretch="None"
+                           RenderOptions.BitmapScalingMode="NearestNeighbor"
+                           SnapsToDevicePixels="True" />
+                    <Image x:Name="OverlayImage"
+                           Source="{Binding OverlaySource, ElementName=Root}"
+                           Stretch="None"
+                           RenderOptions.BitmapScalingMode="NearestNeighbor"
+                           IsHitTestVisible="False"
+                           SnapsToDevicePixels="True" />
+                </Grid>
+            </ScrollViewer>
+
+            <Button Margin="8"
+                    Padding="8,4"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Background="#CC111111"
+                    BorderThickness="0"
+                    Cursor="Hand"
+                    Click="OnTitleButtonClick">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                    </ControlTemplate>
+                </Button.Template>
+                <TextBlock Text="{Binding Title, ElementName=Root}"
+                           Foreground="White"
+                           FontWeight="SemiBold" />
+            </Button>
+        </Grid>
+    </Border>
+</UserControl>
