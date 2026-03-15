@@ -1,0 +1,30 @@
+{
+  "BackgroundSpecificationMode": "ManualSeed",
+  "BackgroundColorHex": "FFFFFF",
+  "Extraction": 1,
+  "NoiseRemoval": 0.35,
+  "ScanWidth": 1,
+  "LineColorHex": "000000",
+  "ScalePercent": 7.331378299120234,
+  "ResizeInterpolation": "Area",
+  "OutputWidth": 300,
+  "OutputHeight": 300,
+  "OutlineEnabled": true,
+  "OutlineColorHex": "000000",
+  "OutlineThickness": 1,
+  "AutoReprocess": true,
+  "BackgroundSeeds": [
+    {
+      "X": 1490,
+      "Y": 1530
+    },
+    {
+      "X": 639,
+      "Y": 1937
+    },
+    {
+      "X": 2333,
+      "Y": 2070
+    }
+  ]
+}

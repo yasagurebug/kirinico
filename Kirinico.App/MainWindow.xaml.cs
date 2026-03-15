@@ -145,6 +145,15 @@ public partial class MainWindow : Window
         }
     }
 
+    private void AboutButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        var window = new AboutWindow(_viewModel)
+        {
+            Owner = this,
+        };
+        window.ShowDialog();
+    }
+
     private void HandModeButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.SelectMode(EditorMode.Hand);
 
     private void WandAddModeButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.SelectMode(EditorMode.WandAddSeed);
@@ -152,6 +161,8 @@ public partial class MainWindow : Window
     private void OutlineEyedropperModeButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.BeginOutlineColorPick();
 
     private void BackgroundEyedropperModeButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.BeginBackgroundColorPick();
+
+    private void LineEyedropperModeButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.BeginLineColorPick();
 
     private void WandRemoveModeButton_OnClick(object sender, RoutedEventArgs e)
     {
@@ -195,7 +206,7 @@ public partial class MainWindow : Window
     {
         if (TryPickColor(out var color))
         {
-            _viewModel.OutlineColorHex = $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+            _viewModel.OutlineColorHex = $"{color.R:X2}{color.G:X2}{color.B:X2}";
         }
     }
 
@@ -203,7 +214,15 @@ public partial class MainWindow : Window
     {
         if (TryPickColor(out var color))
         {
-            _viewModel.BackgroundColorHex = $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+            _viewModel.BackgroundColorHex = $"{color.R:X2}{color.G:X2}{color.B:X2}";
+        }
+    }
+
+    private void LineColorPickerButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (TryPickColor(out var color))
+        {
+            _viewModel.LineColorHex = $"{color.R:X2}{color.G:X2}{color.B:X2}";
         }
     }
 

@@ -22,6 +22,12 @@ public static class ToolbarIconService
 
     public static ImageSource PaletteIcon { get; } = LoadPngImage("palette");
 
+    public static ImageSource ExportIcon { get; } = LoadPngImage("export");
+
+    public static ImageSource ImportIcon { get; } = LoadPngImage("import");
+
+    public static ImageSource AboutIcon { get; } = LoadPngImage("about");
+
     public static ImageSource GetCursorIcon(EditorMode mode) => mode switch
     {
         EditorMode.Hand => HandIcon,

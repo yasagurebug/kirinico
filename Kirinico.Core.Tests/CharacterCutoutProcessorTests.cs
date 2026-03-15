@@ -19,7 +19,7 @@ public sealed class CharacterCutoutProcessorTests
         double extraction = 0.7d,
         double noiseRemoval = 0.3d,
         int scanWidth = 2,
-        LinePolarity linePolarity = LinePolarity.Unspecified) =>
+        RgbColor? lineColor = null) =>
         new()
         {
             BackgroundSpecificationMode = backgroundSpecificationMode,
@@ -27,7 +27,7 @@ public sealed class CharacterCutoutProcessorTests
             Extraction = extraction,
             NoiseRemoval = noiseRemoval,
             ScanWidth = scanWidth,
-            LinePolarity = linePolarity,
+            LineColor = lineColor,
             Resize = DefaultResize(),
         };
 
@@ -194,7 +194,7 @@ public sealed class CharacterCutoutProcessorTests
     }
 
     [Fact]
-    public void Process_BlackLinePolarityPreservesDarkOutline()
+    public void Process_LineColorGuidancePreservesDarkOutline()
     {
         using var image = new Mat(96, 96, MatType.CV_8UC3, new Scalar(255, 255, 255));
         Cv2.Rectangle(image, new Rect(22, 22, 52, 52), new Scalar(24, 24, 24), 3);
@@ -202,10 +202,89 @@ public sealed class CharacterCutoutProcessorTests
 
         var processor = new CharacterCutoutProcessor();
         using var seedMaps = CreateDefaultSeedMaps(image);
-        using var result = processor.Process(image, CreateParameters(scanWidth: 3, linePolarity: LinePolarity.Black), seedMaps);
+        using var result = processor.Process(image, CreateParameters(scanWidth: 3, lineColor: new RgbColor(24, 24, 24)), seedMaps);
 
         Assert.True(result.AlphaMask.Get<byte>(23, 48) > 80);
         Assert.True(result.FinalRgba.At<Vec4b>(23, 48).Item3 > 80);
+    }
+
+    [Fact]
+    public void Process_WhenLocalForegroundIsUnavailable_PreservesObservedColor()
+    {
+        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(18, 18, 28, 28), new Scalar(220, 220, 220), -1);
+
+        var processor = new CharacterCutoutProcessor();
+        using var seedMaps = CreateDefaultSeedMaps(image);
+        using var result = processor.Process(image, CreateParameters(extraction: 0d, scanWidth: 2), seedMaps);
+
+        var edge = result.FinalRgba.At<Vec4b>(18, 32);
+        Assert.InRange(edge.Item3, 1, 254);
+        Assert.Equal(image.At<Vec3b>(18, 32).Item0, edge.Item0);
+        Assert.Equal(image.At<Vec3b>(18, 32).Item1, edge.Item1);
+        Assert.Equal(image.At<Vec3b>(18, 32).Item2, edge.Item2);
+    }
+
+    [Fact]
+    public void FinalizeFromPreResize_MatchesDirectProcess()
+    {
+        using var image = new Mat(80, 80, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(18, 18, 44, 44), new Scalar(32, 48, 64), 2);
+        Cv2.Rectangle(image, new Rect(21, 21, 38, 38), new Scalar(100, 150, 210), -1);
+
+        var parameters = CreateParameters(scanWidth: 3, lineColor: new RgbColor(64, 48, 32));
+        parameters.Resize.ScalePercent = 150d;
+        parameters.Outline = new OutlineOptions
+        {
+            Enabled = true,
+            Color = new RgbColor(0, 0, 0),
+            Thickness = 1.5d,
+        };
+
+        var processor = new CharacterCutoutProcessor();
+        using var seedMapsA = CreateDefaultSeedMaps(image);
+        using var direct = processor.Process(image, parameters, seedMapsA);
+
+        using var seedMapsB = CreateDefaultSeedMaps(image);
+        using var preResize = processor.ProcessPreResize(image, parameters, seedMapsB);
+        using var finalized = processor.FinalizeFromPreResize(preResize, parameters);
+
+        Assert.Equal(direct.ResolvedBackgroundColor, finalized.ResolvedBackgroundColor);
+        Assert.Equal(direct.AlphaMask.Size(), finalized.AlphaMask.Size());
+        Assert.Equal(direct.FinalRgba.Size(), finalized.FinalRgba.Size());
+
+        using var alphaDiff = new Mat();
+        Cv2.Absdiff(direct.AlphaMask, finalized.AlphaMask, alphaDiff);
+        Assert.Equal(0, Cv2.CountNonZero(alphaDiff));
+
+        using var rgbaDiff = new Mat();
+        Cv2.Absdiff(direct.FinalRgba, finalized.FinalRgba, rgbaDiff);
+        var rgbaChannels = rgbaDiff.Split();
+        Assert.All(rgbaChannels, static channel =>
+        {
+            using (channel)
+            {
+                Assert.Equal(0, Cv2.CountNonZero(channel));
+            }
+        });
+    }
+
+    [Fact]
+    public void Process_SmoothingDoesNotBlurStableInteriorColor()
+    {
+        using var image = new Mat(96, 96, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(22, 22, 52, 52), new Scalar(32, 32, 32), 2);
+        Cv2.Rectangle(image, new Rect(25, 25, 46, 46), new Scalar(90, 140, 210), -1);
+
+        var processor = new CharacterCutoutProcessor();
+        using var seedMaps = CreateDefaultSeedMaps(image);
+        using var result = processor.Process(image, CreateParameters(scanWidth: 3, lineColor: new RgbColor(32, 32, 32)), seedMaps);
+
+        var center = result.FinalRgba.At<Vec4b>(48, 48);
+        Assert.Equal(255, center.Item3);
+        Assert.Equal(90, center.Item0);
+        Assert.Equal(140, center.Item1);
+        Assert.Equal(210, center.Item2);
     }
 
     [Fact]
@@ -223,18 +302,21 @@ public sealed class CharacterCutoutProcessorTests
                 Extraction = 0.7d,
                 NoiseRemoval = 0.3d,
                 ScanWidth = 2,
-                LinePolarity = LinePolarity.Unspecified,
                 Resize = DefaultResize(),
                 Outline = new OutlineOptions
                 {
                     Enabled = true,
                     Color = new RgbColor(0, 0, 0),
-                    Thickness = 0.5d,
+                    Thickness = 2.25d,
                 },
             },
             seedMaps);
 
-        var outlineAlpha = result.FinalRgba.At<Vec4b>(19, 32).Item3;
-        Assert.True(outlineAlpha > 0);
+        var solidOutlineAlpha = result.FinalRgba.At<Vec4b>(19, 32).Item3;
+        var featherOutlineAlpha = result.FinalRgba.At<Vec4b>(17, 32).Item3;
+        Assert.True(solidOutlineAlpha > 0);
+        Assert.Equal(255, solidOutlineAlpha);
+        Assert.True(featherOutlineAlpha > 0);
+        Assert.True(featherOutlineAlpha < 255);
     }
 }

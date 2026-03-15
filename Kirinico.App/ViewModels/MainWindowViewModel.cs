@@ -10,10 +10,13 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Application = System.Windows.Application;
 using Brush = System.Windows.Media.Brush;
+using Brushes = System.Windows.Media.Brushes;
 using Cursor = System.Windows.Input.Cursor;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using WinPoint = System.Windows.Point;
+using MediaColor = System.Windows.Media.Color;
+using SolidColorBrush = System.Windows.Media.SolidColorBrush;
 
 namespace Kirinico.App.ViewModels;
 
@@ -28,11 +31,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private Mat? _sourceImage;
     private Mat? _backgroundSeedAddMap;
+    private PreResizeCutoutResult? _cachedPreResizeResult;
     private CutoutResult? _latestResult;
     private CancellationTokenSource? _renderCts;
     private int _renderVersion;
     private bool _syncingDimensions;
     private bool _isDirty;
+    private bool _requiresCoreRender = true;
     private bool _suspendPreviewInvalidation;
 
     private BitmapSource? _originalImage;
@@ -52,16 +57,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isPreviewBusy;
     private bool _isBatchBusy;
     private BackgroundSpecificationMode _selectedBackgroundSpecificationMode = BackgroundSpecificationMode.ColorRange;
-    private string _backgroundColorHex = "#FFFFFF";
+    private string _backgroundColorHex = "FFFFFF";
     private double _extraction = 0.7d;
     private double _noiseRemoval = 0.35d;
     private double _scanWidth = 5d;
-    private LinePolarity _selectedLinePolarity = LinePolarity.Unspecified;
+    private string _lineColorHex = string.Empty;
     private double _scalePercent = 100d;
+    private ResizeInterpolationMode _selectedResizeInterpolation = ResizeInterpolationMode.Lanczos4;
     private int _outputWidth;
     private int _outputHeight;
     private bool _outlineEnabled;
-    private string _outlineColorHex = "#000000";
+    private string _outlineColorHex = "000000";
     private double _outlineThickness = 1d;
     private double _outlineThicknessSliderPosition = 15.019048213408957d;
     private string _outlineThicknessText = "1.0";
@@ -74,6 +80,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private int _seedBlinkHue;
     private bool _isResultShowingAlpha;
     private ColorPickTarget _activeColorPickTarget = ColorPickTarget.Outline;
+    private RgbColor? _eyedropperPreviewColor;
+
+    private enum PreviewDirtyKind
+    {
+        Core,
+        Presentation,
+    }
 
     public MainWindowViewModel()
     {
@@ -97,11 +110,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         new SelectionOption<BackgroundSpecificationMode>(BackgroundSpecificationMode.ColorRange, "色域指定"),
     ];
 
-    public IReadOnlyList<SelectionOption<LinePolarity>> LinePolarityOptions { get; } =
+    public IReadOnlyList<SelectionOption<ResizeInterpolationMode>> ResizeInterpolationOptions { get; } =
     [
-        new SelectionOption<LinePolarity>(LinePolarity.Black, "暗い色"),
-        new SelectionOption<LinePolarity>(LinePolarity.White, "明るい色"),
-        new SelectionOption<LinePolarity>(LinePolarity.Unspecified, "指定なし"),
+        new SelectionOption<ResizeInterpolationMode>(ResizeInterpolationMode.Nearest, "最近傍"),
+        new SelectionOption<ResizeInterpolationMode>(ResizeInterpolationMode.Linear, "線形"),
+        new SelectionOption<ResizeInterpolationMode>(ResizeInterpolationMode.Cubic, "Cubic"),
+        new SelectionOption<ResizeInterpolationMode>(ResizeInterpolationMode.Lanczos4, "Lanczos"),
+        new SelectionOption<ResizeInterpolationMode>(ResizeInterpolationMode.Area, "Area"),
     ];
 
     public ViewportState SharedViewport { get; } = new();
@@ -164,6 +179,28 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return $"{fileName} ver {version}";
         }
     }
+
+    public string AppExecutableName
+    {
+        get
+        {
+            var executablePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? "kirinico.exe";
+            return Path.GetFileName(executablePath);
+        }
+    }
+
+    public string AppVersion
+    {
+        get
+        {
+            var executablePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? "kirinico.exe";
+            return FileVersionInfo.GetVersionInfo(executablePath).FileVersion ?? "0.0.0";
+        }
+    }
+
+    public string AuthorName => "yasagurebug";
+
+    public string RepositoryUrl => "https://github.com/yasagurebug/kirinico";
 
     public string CoordinateStatusText
     {
@@ -243,7 +280,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _extraction, value))
             {
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Core);
             }
         }
     }
@@ -255,9 +292,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _selectedBackgroundSpecificationMode, value))
             {
+                if (value != BackgroundSpecificationMode.ManualSeed && SelectedEditorMode == EditorMode.WandAddSeed)
+                {
+                    UpdateModeState(EditorMode.Hand);
+                }
+
                 OnPropertyChanged(nameof(IsManualSeedBackgroundMode));
                 OnPropertyChanged(nameof(IsColorRangeBackgroundMode));
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Core);
             }
         }
     }
@@ -273,7 +315,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _backgroundColorHex, value))
             {
-                MarkPreviewDirty();
+                OnPropertyChanged(nameof(BackgroundColorPreviewBrush));
+                MarkPreviewDirty(PreviewDirtyKind.Core);
             }
         }
     }
@@ -285,7 +328,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _noiseRemoval, value))
             {
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Core);
             }
         }
     }
@@ -298,19 +341,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             var sanitized = Math.Clamp(Math.Round(value), 0d, 10d);
             if (SetProperty(ref _scanWidth, sanitized))
             {
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Core);
             }
         }
     }
 
-    public LinePolarity SelectedLinePolarity
+    public string LineColorHex
     {
-        get => _selectedLinePolarity;
+        get => _lineColorHex;
         set
         {
-            if (SetProperty(ref _selectedLinePolarity, value))
+            if (SetProperty(ref _lineColorHex, value))
             {
-                MarkPreviewDirty();
+                OnPropertyChanged(nameof(LineColorPreviewBrush));
+                MarkPreviewDirty(PreviewDirtyKind.Core);
             }
         }
     }
@@ -337,7 +381,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(OutputWidth));
             OnPropertyChanged(nameof(OutputHeight));
             _syncingDimensions = false;
-            MarkPreviewDirty();
+            MarkPreviewDirty(PreviewDirtyKind.Presentation);
+        }
+    }
+
+    public ResizeInterpolationMode SelectedResizeInterpolation
+    {
+        get => _selectedResizeInterpolation;
+        set
+        {
+            if (SetProperty(ref _selectedResizeInterpolation, value))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
+            }
         }
     }
 
@@ -360,7 +416,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(OutputHeight));
                 OnPropertyChanged(nameof(ScalePercent));
                 _syncingDimensions = false;
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
@@ -384,7 +440,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(OutputWidth));
                 OnPropertyChanged(nameof(ScalePercent));
                 _syncingDimensions = false;
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
@@ -396,7 +452,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _outlineEnabled, value))
             {
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
@@ -408,7 +464,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _outlineColorHex, value))
             {
-                MarkPreviewDirty();
+                OnPropertyChanged(nameof(OutlineColorPreviewBrush));
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
@@ -425,7 +482,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 _outlineThicknessText = sanitized.ToString("0.0");
                 OnPropertyChanged(nameof(OutlineThicknessSliderPosition));
                 OnPropertyChanged(nameof(OutlineThicknessText));
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
@@ -445,7 +502,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     OnPropertyChanged(nameof(OutlineThickness));
                     _outlineThicknessText = thickness.ToString("0.0");
                     OnPropertyChanged(nameof(OutlineThicknessText));
-                    MarkPreviewDirty();
+                    MarkPreviewDirty(PreviewDirtyKind.Presentation);
                 }
             }
         }
@@ -469,6 +526,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(IsEyedropperMode));
                 OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
                 OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
+                OnPropertyChanged(nameof(IsLineColorEyedropperMode));
                 OnPropertyChanged(nameof(EditableViewerCursor));
                 OnPropertyChanged(nameof(ResultViewerCursor));
                 OnPropertyChanged(nameof(EditableViewerPansWithLeftButton));
@@ -486,6 +544,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public bool IsOutlineColorEyedropperMode => IsEyedropperMode && _activeColorPickTarget == ColorPickTarget.Outline;
 
     public bool IsBackgroundColorEyedropperMode => IsEyedropperMode && _activeColorPickTarget == ColorPickTarget.Background;
+
+    public bool IsLineColorEyedropperMode => IsEyedropperMode && _activeColorPickTarget == ColorPickTarget.Line;
+
+    public Brush BackgroundColorPreviewBrush => CreatePreviewBrush(ColorPickTarget.Background, BackgroundColorHex);
+
+    public Brush LineColorPreviewBrush => CreatePreviewBrush(ColorPickTarget.Line, LineColorHex);
+
+    public Brush OutlineColorPreviewBrush => CreatePreviewBrush(ColorPickTarget.Outline, OutlineColorHex);
 
     public bool AutoReprocess
     {
@@ -596,6 +662,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             _sourceImage?.Dispose();
             _sourceImage = loaded.Clone();
+            DisposeCachedPreResizeResult();
+            _requiresCoreRender = true;
 
             _backgroundSeedAddMap?.Dispose();
             _backgroundSeedAddMap = new Mat(_sourceImage.Rows, _sourceImage.Cols, MatType.CV_8UC1, Scalar.All(0d));
@@ -607,6 +675,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var topLeftPixel = _sourceImage.At<Vec3b>(0, 0);
         _backgroundColorHex = new RgbColor(topLeftPixel.Item2, topLeftPixel.Item1, topLeftPixel.Item0).ToHex();
         OnPropertyChanged(nameof(BackgroundColorHex));
+        OnPropertyChanged(nameof(BackgroundColorPreviewBrush));
         SharedViewport.Reset();
 
         _syncingDimensions = true;
@@ -640,7 +709,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         });
     }
 
-    public void Reprocess() => QueueRender(immediate: true);
+    public void Reprocess()
+    {
+        DisposeCachedPreResizeResult();
+        _requiresCoreRender = true;
+        QueueRender(immediate: true);
+    }
 
     public void CycleFinalBackground()
     {
@@ -711,16 +785,30 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public void BeginOutlineColorPick()
     {
         _activeColorPickTarget = ColorPickTarget.Outline;
+        ClearEyedropperPreview();
         OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
         OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
+        OnPropertyChanged(nameof(IsLineColorEyedropperMode));
         UpdateModeState(EditorMode.Eyedropper);
     }
 
     public void BeginBackgroundColorPick()
     {
         _activeColorPickTarget = ColorPickTarget.Background;
+        ClearEyedropperPreview();
         OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
         OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
+        OnPropertyChanged(nameof(IsLineColorEyedropperMode));
+        UpdateModeState(EditorMode.Eyedropper);
+    }
+
+    public void BeginLineColorPick()
+    {
+        _activeColorPickTarget = ColorPickTarget.Line;
+        ClearEyedropperPreview();
+        OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
+        OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
+        OnPropertyChanged(nameof(IsLineColorEyedropperMode));
         UpdateModeState(EditorMode.Eyedropper);
     }
 
@@ -746,6 +834,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 items.Add(new SeedPreviewItem
                 {
                     SeedPoint = new OpenCvSharp.Point(x, y),
+                    CoordinateText = $"({x}, {y})",
                     PreviewImage = CreateSeedPreviewBitmap(_sourceImage, x, y),
                 });
             }
@@ -768,7 +857,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         _backgroundSeedAddMap.Set(point.Y, point.X, 0);
         RefreshEditOverlay();
-        MarkPreviewDirty();
+        MarkPreviewDirty(PreviewDirtyKind.Core);
     }
 
     public void SetHoverHelp(string? message)
@@ -809,9 +898,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         switch (SelectedEditorMode)
         {
             case EditorMode.WandAddSeed:
+                if (!IsManualSeedBackgroundMode)
+                {
+                    UpdateModeState(EditorMode.Hand);
+                    return;
+                }
+
                 ApplySeedPoint(_backgroundSeedAddMap, null, imageX, imageY);
                 RefreshEditOverlay();
-                MarkPreviewDirty();
+                MarkPreviewDirty(PreviewDirtyKind.Core);
+                UpdateModeState(EditorMode.Hand);
                 return;
             case EditorMode.Eyedropper:
                 SampleColorFromOriginal(imageX, imageY);
@@ -826,12 +922,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (_sourceImage is null)
         {
             CoordinateStatusText = string.Empty;
+            ClearEyedropperPreview();
             return;
         }
 
         var x = Math.Clamp((int)Math.Round(point.X), 0, _sourceImage.Width - 1);
         var y = Math.Clamp((int)Math.Round(point.Y), 0, _sourceImage.Height - 1);
         var pixel = _sourceImage.At<Vec3b>(y, x);
+        UpdateEyedropperPreview(new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0));
         CoordinateStatusText = FormatCoordinateStatus("元画像", x, y, new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0), 100d);
     }
 
@@ -840,6 +938,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (_latestResult is null)
         {
             CoordinateStatusText = string.Empty;
+            ClearEyedropperPreview();
             return;
         }
 
@@ -857,6 +956,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             CoordinateStatusText = string.Empty;
             SetResultViewerBackgroundHelpActive(false);
+            ClearEyedropperPreview();
             return;
         }
 
@@ -864,6 +964,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var x = Math.Clamp((int)Math.Round(point.X), 0, finalRgba.Width - 1);
         var y = Math.Clamp((int)Math.Round(point.Y), 0, finalRgba.Height - 1);
         var pixel = finalRgba.At<Vec4b>(y, x);
+        UpdateEyedropperPreview(new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0));
         CoordinateStatusText = FormatCoordinateStatus("結果", x, y, new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0), pixel.Item3 * 100d / 255d);
         SetResultViewerBackgroundHelpActive(SelectedEditorMode == EditorMode.Hand && !IsResultShowingAlpha);
     }
@@ -877,11 +978,24 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         if (SelectedEditorMode == EditorMode.WandAddSeed && _sourceImage is not null)
         {
-            var imageX = Math.Clamp((int)Math.Round(sourcePoint.X), 0, _sourceImage.Width - 1);
-            var imageY = Math.Clamp((int)Math.Round(sourcePoint.Y), 0, _sourceImage.Height - 1);
+            if (!IsManualSeedBackgroundMode)
+            {
+                UpdateModeState(EditorMode.Hand);
+                return;
+            }
+
+            var imageX = Math.Clamp(
+                (int)Math.Round(displayPoint.X / Math.Max(0.0001d, ResultCoordinateScaleX)),
+                0,
+                _sourceImage.Width - 1);
+            var imageY = Math.Clamp(
+                (int)Math.Round(displayPoint.Y / Math.Max(0.0001d, ResultCoordinateScaleY)),
+                0,
+                _sourceImage.Height - 1);
             ApplySeedPoint(_backgroundSeedAddMap, null, imageX, imageY);
             RefreshEditOverlay();
-            MarkPreviewDirty();
+            MarkPreviewDirty(PreviewDirtyKind.Core);
+            UpdateModeState(EditorMode.Hand);
             return;
         }
 
@@ -901,6 +1015,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         CoordinateStatusText = string.Empty;
         SetResultViewerBackgroundHelpActive(false);
+        ClearEyedropperPreview();
     }
 
     public void EndEditableInteraction() { }
@@ -945,6 +1060,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         _renderCts?.Cancel();
         _renderCts?.Dispose();
+        _cachedPreResizeResult?.Dispose();
         _latestResult?.Dispose();
         _sourceImage?.Dispose();
         _backgroundSeedAddMap?.Dispose();
@@ -1043,7 +1159,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             case ColorPickTarget.Background:
                 BackgroundColorHex = color.ToHex();
                 statusText = $"背景色を取得しました: {BackgroundColorHex}";
-                MarkPreviewDirty();
+                break;
+            case ColorPickTarget.Line:
+                LineColorHex = color.ToHex();
+                statusText = $"主線色を取得しました: {LineColorHex}";
                 break;
             default:
                 OutlineColorHex = color.ToHex();
@@ -1051,6 +1170,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 break;
         }
 
+        ClearEyedropperPreview();
         UpdateModeState(EditorMode.Hand);
         _statusText = statusText;
         OnPropertyChanged(nameof(StatusText));
@@ -1075,8 +1195,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _ = RenderPreviewAsync(_renderCts.Token, renderVersion, immediate ? 0 : 120);
     }
 
-    private void MarkPreviewDirty()
+    private void MarkPreviewDirty(PreviewDirtyKind kind = PreviewDirtyKind.Core)
     {
+        if (kind == PreviewDirtyKind.Core)
+        {
+            DisposeCachedPreResizeResult();
+            _requiresCoreRender = true;
+        }
+
         if (_suspendPreviewInvalidation)
         {
             _isDirty = true;
@@ -1106,6 +1232,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(StatusText));
     }
 
+    private void DisposeCachedPreResizeResult()
+    {
+        _cachedPreResizeResult?.Dispose();
+        _cachedPreResizeResult = null;
+    }
+
     private AppSettingsSnapshot CreateSettingsSnapshot() => new()
     {
         BackgroundSpecificationMode = SelectedBackgroundSpecificationMode,
@@ -1113,14 +1245,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         Extraction = Extraction,
         NoiseRemoval = NoiseRemoval,
         ScanWidth = ScanWidth,
-        LinePolarity = SelectedLinePolarity,
+        LineColorHex = LineColorHex,
         ScalePercent = ScalePercent,
+        ResizeInterpolation = SelectedResizeInterpolation,
         OutputWidth = OutputWidth,
         OutputHeight = OutputHeight,
         OutlineEnabled = OutlineEnabled,
         OutlineColorHex = OutlineColorHex,
         OutlineThickness = OutlineThickness,
         AutoReprocess = AutoReprocess,
+        BackgroundSeeds = CollectSeedSnapshots(),
     };
 
     private void ApplySettingsSnapshot(AppSettingsSnapshot snapshot)
@@ -1133,14 +1267,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             Extraction = snapshot.Extraction;
             NoiseRemoval = snapshot.NoiseRemoval;
             ScanWidth = snapshot.ScanWidth;
-            SelectedLinePolarity = snapshot.LinePolarity;
+            LineColorHex = snapshot.LineColorHex;
             ScalePercent = snapshot.ScalePercent;
+            SelectedResizeInterpolation = snapshot.ResizeInterpolation;
             OutputWidth = Math.Max(1, snapshot.OutputWidth);
             OutputHeight = Math.Max(1, snapshot.OutputHeight);
             OutlineEnabled = snapshot.OutlineEnabled;
             OutlineColorHex = snapshot.OutlineColorHex;
             OutlineThickness = snapshot.OutlineThickness;
             AutoReprocess = snapshot.AutoReprocess;
+            RestoreSeedSnapshots(snapshot.BackgroundSeeds);
         }
         finally
         {
@@ -1178,6 +1314,59 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         },
     };
 
+    private List<AppSettingsSnapshot.SeedPointSnapshot> CollectSeedSnapshots()
+    {
+        var result = new List<AppSettingsSnapshot.SeedPointSnapshot>();
+        if (_backgroundSeedAddMap is null || _backgroundSeedAddMap.Empty())
+        {
+            return result;
+        }
+
+        var indexer = _backgroundSeedAddMap.GetGenericIndexer<byte>();
+        for (var y = 0; y < _backgroundSeedAddMap.Rows; y++)
+        {
+            for (var x = 0; x < _backgroundSeedAddMap.Cols; x++)
+            {
+                if (indexer[y, x] == 0)
+                {
+                    continue;
+                }
+
+                result.Add(new AppSettingsSnapshot.SeedPointSnapshot
+                {
+                    X = x,
+                    Y = y,
+                });
+            }
+        }
+
+        return result;
+    }
+
+    private void RestoreSeedSnapshots(IReadOnlyList<AppSettingsSnapshot.SeedPointSnapshot>? seeds)
+    {
+        if (_backgroundSeedAddMap is null || _backgroundSeedAddMap.Empty())
+        {
+            return;
+        }
+
+        _backgroundSeedAddMap.SetTo(Scalar.All(0d));
+        if (seeds is not null)
+        {
+            foreach (var seed in seeds)
+            {
+                if (seed.X < 0 || seed.Y < 0 || seed.X >= _backgroundSeedAddMap.Cols || seed.Y >= _backgroundSeedAddMap.Rows)
+                {
+                    continue;
+                }
+
+                _backgroundSeedAddMap.Set(seed.Y, seed.X, 255);
+            }
+        }
+
+        RefreshEditOverlay();
+    }
+
     private async Task RenderPreviewAsync(CancellationToken cancellationToken, int renderVersion, int delayMs)
     {
         try
@@ -1192,27 +1381,39 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            Mat sourceClone;
+            Mat? sourceClone = null;
             ManualEditMaps? manualMaps = null;
+            PreResizeCutoutResult? preResizeCacheClone = null;
             CutoutParameters parameters;
+            var needsCoreRender = true;
 
             lock (_syncRoot)
             {
-                sourceClone = _sourceImage?.Clone() ?? throw new InvalidOperationException("元画像が読み込まれていません。");
-                if (_backgroundSeedAddMap is not null)
-                {
-                    manualMaps = new ManualEditMaps
-                    {
-                        BackgroundSeedAddMap = _backgroundSeedAddMap?.Clone(),
-                    };
-                }
-
                 parameters = BuildParameters();
+                needsCoreRender = _requiresCoreRender || _cachedPreResizeResult is null;
+
+                if (needsCoreRender)
+                {
+                    sourceClone = _sourceImage?.Clone() ?? throw new InvalidOperationException("元画像が読み込まれていません。");
+                    if (_backgroundSeedAddMap is not null)
+                    {
+                        manualMaps = new ManualEditMaps
+                        {
+                            BackgroundSeedAddMap = _backgroundSeedAddMap.Clone(),
+                        };
+                    }
+                }
+                else
+                {
+                    preResizeCacheClone = _cachedPreResizeResult!.Clone();
+                }
             }
 
-            if (parameters.BackgroundSpecificationMode == BackgroundSpecificationMode.ManualSeed && !HasAnyBackgroundSeed(manualMaps))
+            if (needsCoreRender
+                && parameters.BackgroundSpecificationMode == BackgroundSpecificationMode.ManualSeed
+                && !HasAnyBackgroundSeed(manualMaps))
             {
-                sourceClone.Dispose();
+                sourceClone?.Dispose();
                 manualMaps?.Dispose();
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
@@ -1223,6 +1424,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                     _latestResult?.Dispose();
                     _latestResult = null;
+                    DisposeCachedPreResizeResult();
+                    _requiresCoreRender = true;
                     AlphaImage = null;
                     FinalImage = null;
                     OnPropertyChanged(nameof(DisplayedResultImage));
@@ -1251,13 +1454,50 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(StatusText));
             });
 
+            if (!needsCoreRender)
+            {
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    {
+                        return;
+                    }
+
+                    IsPreviewBusy = true;
+                    PreviewProgressPercent = 96d;
+                    PreviewStageText = "リサイズと縁取りを適用";
+                    _statusText = "プレビュー更新中: リサイズと縁取りを適用";
+                    OnPropertyChanged(nameof(StatusText));
+                });
+            }
+
+            PreResizeCutoutResult? refreshedPreResize = null;
+
             using (sourceClone)
             using (manualMaps)
+            using (preResizeCacheClone)
             {
-                var result = await Task.Run(() => _processor.Process(sourceClone, parameters, manualMaps, progress), cancellationToken);
+                CutoutResult result;
+                if (needsCoreRender)
+                {
+                    refreshedPreResize = await Task.Run(() => _processor.ProcessPreResize(sourceClone!, parameters, manualMaps, progress), cancellationToken);
+                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    {
+                        refreshedPreResize.Dispose();
+                        return;
+                    }
+
+                    result = await Task.Run(() => _processor.FinalizeFromPreResize(refreshedPreResize, parameters, progress), cancellationToken);
+                }
+                else
+                {
+                    result = await Task.Run(() => _processor.FinalizeFromPreResize(preResizeCacheClone!, parameters, progress), cancellationToken);
+                }
+
                 if (renderVersion != Volatile.Read(ref _renderVersion))
                 {
                     result.Dispose();
+                    refreshedPreResize?.Dispose();
                     return;
                 }
 
@@ -1276,6 +1516,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                     _latestResult?.Dispose();
                     _latestResult = result;
+                    if (refreshedPreResize is not null)
+                    {
+                        DisposeCachedPreResizeResult();
+                        _cachedPreResizeResult = refreshedPreResize;
+                        _requiresCoreRender = false;
+                        refreshedPreResize = null;
+                    }
                     AlphaImage = alphaBitmap;
                     FinalImage = finalBitmap;
                     OnPropertyChanged(nameof(DisplayedResultImage));
@@ -1339,10 +1586,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             Extraction = Extraction,
             NoiseRemoval = NoiseRemoval,
             ScanWidth = (int)Math.Round(ScanWidth),
-            LinePolarity = SelectedLinePolarity,
+            LineColor = RgbColor.TryParseHex(LineColorHex, out var parsedLineColor)
+                ? parsedLineColor
+                : null,
             Resize = new ResizeOptions
             {
                 Mode = ResizeMode.Scale,
+                Interpolation = SelectedResizeInterpolation,
                 ScalePercent = ScalePercent,
                 OutputWidth = OutputWidth,
                 OutputHeight = OutputHeight,
@@ -1358,6 +1608,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void UpdateModeState(EditorMode mode)
     {
+        if (mode != EditorMode.Eyedropper)
+        {
+            ClearEyedropperPreview();
+        }
+
         SelectedEditorMode = mode;
         _statusText = GetCurrentModeMessage();
         OnPropertyChanged(nameof(StatusText));
@@ -1370,9 +1625,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return ToolbarCursorService.GetModeMessage(SelectedEditorMode);
         }
 
-        return _activeColorPickTarget == ColorPickTarget.Background
-            ? "元画像または結果画像をクリックして背景色を取得します。"
-            : "元画像または結果画像をクリックして縁取り色を取得します。";
+        return _activeColorPickTarget switch
+        {
+            ColorPickTarget.Background => "元画像または結果画像をクリックして背景色を取得します。",
+            ColorPickTarget.Line => "元画像または結果画像をクリックして主線色を取得します。",
+            _ => "元画像または結果画像をクリックして縁取り色を取得します。",
+        };
     }
 
     private void UpdateZoomPercentText() => ZoomPercentText = $"{SharedViewport.Zoom * 100d:0.#}%";
@@ -1422,6 +1680,57 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private static string FormatCoordinateStatus(string label, int x, int y, RgbColor color, double alphaPercent)
         => $"{label} ({x},{y}) {color.ToHex()} {alphaPercent:0}%";
+
+    private void UpdateEyedropperPreview(RgbColor color)
+    {
+        if (SelectedEditorMode != EditorMode.Eyedropper)
+        {
+            return;
+        }
+
+        _eyedropperPreviewColor = color;
+        NotifyColorPreviewBrushesChanged();
+    }
+
+    private void ClearEyedropperPreview()
+    {
+        if (!_eyedropperPreviewColor.HasValue)
+        {
+            return;
+        }
+
+        _eyedropperPreviewColor = null;
+        NotifyColorPreviewBrushesChanged();
+    }
+
+    private void NotifyColorPreviewBrushesChanged()
+    {
+        OnPropertyChanged(nameof(BackgroundColorPreviewBrush));
+        OnPropertyChanged(nameof(LineColorPreviewBrush));
+        OnPropertyChanged(nameof(OutlineColorPreviewBrush));
+    }
+
+    private Brush CreatePreviewBrush(ColorPickTarget target, string hex)
+    {
+        var previewColor = IsEyedropperMode && _activeColorPickTarget == target
+            ? _eyedropperPreviewColor
+            : null;
+        if (previewColor.HasValue)
+        {
+            return CreateSolidBrush(previewColor.Value);
+        }
+
+        return RgbColor.TryParseHex(hex, out var parsed)
+            ? CreateSolidBrush(parsed)
+            : Brushes.Transparent;
+    }
+
+    private static Brush CreateSolidBrush(RgbColor color)
+    {
+        var brush = new SolidColorBrush(MediaColor.FromRgb(color.R, color.G, color.B));
+        brush.Freeze();
+        return brush;
+    }
 
     private static double ConvertSliderPositionToOutlineThickness(double position)
     {

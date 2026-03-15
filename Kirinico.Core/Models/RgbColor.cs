@@ -6,7 +6,7 @@ public readonly record struct RgbColor(byte R, byte G, byte B)
 {
     public Scalar ToBgrScalar() => new(B, G, R);
 
-    public string ToHex() => $"#{R:X2}{G:X2}{B:X2}";
+    public string ToHex() => $"{R:X2}{G:X2}{B:X2}";
 
     public static bool TryParseHex(string? value, out RgbColor color)
     {

@@ -12,7 +12,7 @@ public sealed class CutoutParameters
 
     public int ScanWidth { get; set; } = 5;
 
-    public LinePolarity LinePolarity { get; set; } = LinePolarity.Unspecified;
+    public RgbColor? LineColor { get; set; }
 
     public ResizeOptions Resize { get; set; } = new();
 

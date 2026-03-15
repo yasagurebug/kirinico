@@ -6,6 +6,8 @@ public sealed class ResizeOptions
 {
     public ResizeMode Mode { get; set; } = ResizeMode.Scale;
 
+    public ResizeInterpolationMode Interpolation { get; set; } = ResizeInterpolationMode.Lanczos4;
+
     public double ScalePercent { get; set; } = 100d;
 
     public int OutputWidth { get; set; }

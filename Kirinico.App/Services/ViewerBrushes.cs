@@ -15,7 +15,7 @@ namespace Kirinico.App.Services;
 public static class ViewerBrushes
 {
     private static readonly Brush CheckerBrush = CreateCheckerBrush();
-    private static readonly Brush AlphaFixedBrush = CreateAlphaFixedBrush();
+    private static readonly Brush AlphaFixedBrush = CreateFrozenBrush(Color.FromRgb(0, 0, 0));
     private static readonly Brush BlackBrush = CreateFrozenBrush(Color.FromRgb(16, 16, 16));
     private static readonly Brush WhiteBrush = CreateFrozenBrush(Color.FromRgb(250, 250, 250));
     private static readonly Brush GrayBrush = CreateFrozenBrush(Color.FromRgb(128, 128, 128));
@@ -68,25 +68,4 @@ public static class ViewerBrushes
         return brush;
     }
 
-    private static Brush CreateAlphaFixedBrush()
-    {
-        var white = CreateFrozenBrush(Color.FromRgb(255, 255, 255));
-        var black = CreateFrozenBrush(Color.FromRgb(0, 0, 0));
-
-        var group = new DrawingGroup();
-        group.Children.Add(new GeometryDrawing(white, null, new RectangleGeometry(new System.Windows.Rect(0, 0, 24, 24))));
-        group.Children.Add(new GeometryDrawing(black, null, new RectangleGeometry(new System.Windows.Rect(0, 0, 12, 12))));
-        group.Children.Add(new GeometryDrawing(black, null, new RectangleGeometry(new System.Windows.Rect(12, 12, 12, 12))));
-        group.Freeze();
-
-        var brush = new DrawingBrush(group)
-        {
-            TileMode = TileMode.Tile,
-            Viewport = new System.Windows.Rect(0, 0, 24, 24),
-            ViewportUnits = BrushMappingMode.Absolute,
-            Stretch = Stretch.None,
-        };
-        brush.Freeze();
-        return brush;
-    }
 }

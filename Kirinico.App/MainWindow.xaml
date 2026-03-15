@@ -127,6 +127,25 @@
                 BorderThickness="1"
                 CornerRadius="10">
             <DockPanel LastChildFill="False">
+                <StackPanel DockPanel.Dock="Right"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <Button Style="{StaticResource ToolbarButtonStyle}"
+                            Margin="18,0,0,0"
+                            Click="AboutButton_OnClick"
+                            ToolTip="About">
+                        <StackPanel Orientation="Horizontal">
+                            <Image Width="20"
+                                   Height="20"
+                                   VerticalAlignment="Center"
+                                   Source="{x:Static services:ToolbarIconService.AboutIcon}" />
+                            <TextBlock Margin="8,0,0,0"
+                                       VerticalAlignment="Center"
+                                       Text="About" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+
                 <StackPanel DockPanel.Dock="Left"
                             Orientation="Horizontal"
                             VerticalAlignment="Center">
@@ -172,6 +191,16 @@
                         </StackPanel>
                     </Button>
 
+                    <CheckBox Margin="0,0,18,0"
+                              VerticalAlignment="Center"
+                              Foreground="#E8EEF5"
+                              Content="自動再処理"
+                              IsChecked="{Binding AutoReprocess}"
+                              ToolTip="設定変更や手動指定のたびに自動再処理します。"
+                              Tag="設定変更や手動指定のたびに自動再処理します。"
+                              MouseEnter="SettingHelp_OnMouseEnter"
+                              MouseLeave="SettingHelp_OnMouseLeave" />
+
                     <ComboBox x:Name="ZoomComboBox"
                               Style="{StaticResource ToolbarComboBoxStyle}"
                               Width="110"
@@ -199,33 +228,34 @@
                         </StackPanel>
                     </ToggleButton>
 
-                    <ToggleButton Style="{StaticResource ToolbarToggleStyle}"
-                                  IsChecked="{Binding IsWandAddMode, Mode=OneWay}"
-                                  Click="WandAddModeButton_OnClick"
-                                  ToolTip="背景 seed を追加">
-                        <StackPanel Orientation="Horizontal">
-                            <Image Width="22"
-                                   Height="22"
-                                   Source="{x:Static services:ToolbarIconService.WandAddIcon}" />
-                            <TextBlock Margin="6,0,0,0"
-                                       VerticalAlignment="Center"
-                                       Text="追加" />
-                        </StackPanel>
-                    </ToggleButton>
-
                     <Button Style="{StaticResource ToolbarButtonStyle}"
-                            Click="WandRemoveModeButton_OnClick"
-                            ToolTip="背景 seed を削除">
+                            Margin="18,0,8,0"
+                            Click="ExportSettingsButton_OnClick"
+                            ToolTip="現在の設定を JSON として書き出します。">
                         <StackPanel Orientation="Horizontal">
-                            <Image Width="22"
-                                   Height="22"
-                                   Source="{x:Static services:ToolbarIconService.WandRemoveIcon}" />
-                            <TextBlock Margin="6,0,0,0"
+                            <Image Width="20"
+                                   Height="20"
+                                   VerticalAlignment="Center"
+                                   Source="{x:Static services:ToolbarIconService.ExportIcon}" />
+                            <TextBlock Margin="8,0,0,0"
                                        VerticalAlignment="Center"
-                                       Text="削除" />
+                                       Text="設定エクスポート" />
                         </StackPanel>
                     </Button>
 
+                    <Button Style="{StaticResource ToolbarButtonStyle}"
+                            Click="ImportSettingsButton_OnClick"
+                            ToolTip="JSON ファイルから設定を読み込みます。">
+                        <StackPanel Orientation="Horizontal">
+                            <Image Width="20"
+                                   Height="20"
+                                   VerticalAlignment="Center"
+                                   Source="{x:Static services:ToolbarIconService.ImportIcon}" />
+                            <TextBlock Margin="8,0,0,0"
+                                       VerticalAlignment="Center"
+                                       Text="設定インポート" />
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -286,10 +316,9 @@
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="1*" />
-                            <ColumnDefinition Width="2*" />
-                            <ColumnDefinition Width="0.5*" />
+                            <ColumnDefinition Width="1.5*" />
                             <ColumnDefinition Width="1*" />
-                            <ColumnDefinition Width="0.5*" />
+                            <ColumnDefinition Width="1*" />
                         </Grid.ColumnDefinitions>
 
                         <GroupBox Grid.Column="0"
@@ -336,6 +365,15 @@
                                                Height="18"
                                                Source="{x:Static services:ToolbarIconService.PaletteIcon}" />
                                     </Button>
+                                    <Border DockPanel.Dock="Right"
+                                            Width="24"
+                                            Height="24"
+                                            Margin="0,0,6,0"
+                                            VerticalAlignment="Center"
+                                            CornerRadius="2"
+                                            BorderBrush="#5A6570"
+                                            BorderThickness="1"
+                                            Background="{Binding BackgroundColorPreviewBrush}" />
                                     <TextBox Text="{Binding BackgroundColorHex, UpdateSourceTrigger=PropertyChanged}"
                                              Style="{StaticResource InputTextBoxStyle}"
                                              ToolTip="色域指定モードの背景色です。"
@@ -343,6 +381,45 @@
                                              MouseEnter="SettingHelp_OnMouseEnter"
                                              MouseLeave="SettingHelp_OnMouseLeave" />
                                 </DockPanel>
+
+                                <TextBlock Margin="0,12,0,0"
+                                           Text="seed"
+                                           Tag="手動seedモードで背景 seed の追加と管理を行います。"
+                                           ToolTip="手動seedモードで背景 seed の追加と管理を行います。"
+                                           MouseEnter="SettingHelp_OnMouseEnter"
+                                           MouseLeave="SettingHelp_OnMouseLeave" />
+                                <StackPanel Margin="0,4,0,0"
+                                            Orientation="Horizontal"
+                                            IsEnabled="{Binding IsManualSeedBackgroundMode}">
+                                    <ToggleButton Style="{StaticResource ToolbarToggleStyle}"
+                                                  Margin="0,0,8,0"
+                                                  IsChecked="{Binding IsWandAddMode, Mode=OneWay}"
+                                                  Click="WandAddModeButton_OnClick"
+                                                  ToolTip="背景 seed を追加">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Image Width="18"
+                                                   Height="18"
+                                                   Source="{x:Static services:ToolbarIconService.WandAddIcon}" />
+                                            <TextBlock Margin="6,0,0,0"
+                                                       VerticalAlignment="Center"
+                                                       Text="追加" />
+                                        </StackPanel>
+                                    </ToggleButton>
+
+                                    <Button Style="{StaticResource ToolbarButtonStyle}"
+                                            Margin="0"
+                                            Click="WandRemoveModeButton_OnClick"
+                                            ToolTip="背景 seed を削除">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Image Width="18"
+                                                   Height="18"
+                                                   Source="{x:Static services:ToolbarIconService.WandRemoveIcon}" />
+                                            <TextBlock Margin="6,0,0,0"
+                                                       VerticalAlignment="Center"
+                                                       Text="削除" />
+                                        </StackPanel>
+                                    </Button>
+                                </StackPanel>
                             </StackPanel>
                         </GroupBox>
 
@@ -401,19 +478,46 @@
                                         MouseLeave="SettingHelp_OnMouseLeave"
                                         Value="{Binding ScanWidth}" />
                                 <TextBlock Margin="0,10,0,0"
-                                           Text="主線極性"
-                                           Tag="主線が黒系か白系か、指定しないかを選びます。"
-                                           ToolTip="主線が黒系か白系か、指定しないかを選びます。"
+                                           Text="主線指定"
+                                           Tag="代表的な主線色です。輪郭の色復元で参照します。"
+                                           ToolTip="代表的な主線色です。輪郭の色復元で参照します。"
                                            MouseEnter="SettingHelp_OnMouseEnter"
                                            MouseLeave="SettingHelp_OnMouseLeave" />
-                                <ComboBox ItemsSource="{Binding LinePolarityOptions}"
-                                          DisplayMemberPath="Label"
-                                          SelectedValuePath="Value"
-                                          SelectedValue="{Binding SelectedLinePolarity}"
-                                          Tag="主線が黒系か白系か、指定しないかを選びます。"
-                                          ToolTip="主線が黒系か白系か、指定しないかを選びます。"
-                                          MouseEnter="SettingHelp_OnMouseEnter"
-                                          MouseLeave="SettingHelp_OnMouseLeave" />
+                                <DockPanel Margin="0,0,0,8">
+                                    <ToggleButton DockPanel.Dock="Right"
+                                                  Width="32"
+                                                  Margin="0,0,6,0"
+                                                  IsChecked="{Binding IsLineColorEyedropperMode, Mode=OneWay}"
+                                                  Click="LineEyedropperModeButton_OnClick"
+                                                  ToolTip="元画像または結果画像から主線色を取得">
+                                        <Image Width="18"
+                                               Height="18"
+                                               Source="{x:Static services:ToolbarIconService.DropperIcon}" />
+                                    </ToggleButton>
+                                    <Button DockPanel.Dock="Right"
+                                            Width="32"
+                                            Click="LineColorPickerButton_OnClick"
+                                            ToolTip="主線色を選ぶ">
+                                        <Image Width="18"
+                                               Height="18"
+                                               Source="{x:Static services:ToolbarIconService.PaletteIcon}" />
+                                    </Button>
+                                    <Border DockPanel.Dock="Right"
+                                            Width="24"
+                                            Height="24"
+                                            Margin="0,0,6,0"
+                                            VerticalAlignment="Center"
+                                            CornerRadius="2"
+                                            BorderBrush="#5A6570"
+                                            BorderThickness="1"
+                                            Background="{Binding LineColorPreviewBrush}" />
+                                    <TextBox Text="{Binding LineColorHex, UpdateSourceTrigger=PropertyChanged}"
+                                             Style="{StaticResource InputTextBoxStyle}"
+                                             ToolTip="代表的な主線色です。輪郭の色復元で参照します。"
+                                             Tag="代表的な主線色です。輪郭の色復元で参照します。"
+                                             MouseEnter="SettingHelp_OnMouseEnter"
+                                             MouseLeave="SettingHelp_OnMouseLeave" />
+                                </DockPanel>
                             </StackPanel>
                         </GroupBox>
 
@@ -422,6 +526,20 @@
                                   Header="出力サイズ"
                                   Foreground="#E8EEF5">
                             <StackPanel Margin="8">
+                                <TextBlock Text="リサイズ方式"
+                                           Tag="出力リサイズ時の補間方式です。最近傍、線形、Cubic、Lanczos、Area から選べます。"
+                                           ToolTip="出力リサイズ時の補間方式です。最近傍、線形、Cubic、Lanczos、Area から選べます。"
+                                           MouseEnter="SettingHelp_OnMouseEnter"
+                                           MouseLeave="SettingHelp_OnMouseLeave" />
+                                <ComboBox ItemsSource="{Binding ResizeInterpolationOptions}"
+                                          DisplayMemberPath="Label"
+                                          SelectedValuePath="Value"
+                                          SelectedValue="{Binding SelectedResizeInterpolation}"
+                                          Margin="0,0,0,8"
+                                          Tag="出力リサイズ時の補間方式です。最近傍、線形、Cubic、Lanczos、Area から選べます。"
+                                          ToolTip="出力リサイズ時の補間方式です。最近傍、線形、Cubic、Lanczos、Area から選べます。"
+                                          MouseEnter="SettingHelp_OnMouseEnter"
+                                          MouseLeave="SettingHelp_OnMouseLeave" />
                                 <TextBlock Text="倍率 (%)"
                                            Tag="倍率を変えると幅と高さも連動します。"
                                            MouseEnter="SettingHelp_OnMouseEnter"
@@ -496,6 +614,15 @@
                                                Height="18"
                                                Source="{x:Static services:ToolbarIconService.PaletteIcon}" />
                                     </Button>
+                                    <Border DockPanel.Dock="Right"
+                                            Width="24"
+                                            Height="24"
+                                            Margin="0,0,6,0"
+                                            VerticalAlignment="Center"
+                                            CornerRadius="2"
+                                            BorderBrush="#5A6570"
+                                            BorderThickness="1"
+                                            Background="{Binding OutlineColorPreviewBrush}" />
                                     <TextBox Text="{Binding OutlineColorHex}"
                                              Style="{StaticResource InputTextBoxStyle}"
                                              ToolTip="縁取り色です。"
@@ -534,38 +661,6 @@
                             </StackPanel>
                         </GroupBox>
 
-                        <GroupBox Grid.Column="4"
-                                  Margin="0"
-                                  Header="その他"
-                                  Foreground="#E8EEF5">
-                            <StackPanel Margin="8">
-                                <CheckBox Content="自動再処理"
-                                          Foreground="#E8EEF5"
-                                          IsChecked="{Binding AutoReprocess}"
-                                          Margin="0,0,0,10"
-                                          ToolTip="設定変更や手動指定のたびに自動再処理します。"
-                                          Tag="設定変更や手動指定のたびに自動再処理します。"
-                                          MouseEnter="SettingHelp_OnMouseEnter"
-                                          MouseLeave="SettingHelp_OnMouseLeave" />
-                                <Button Content="設定エクスポート"
-                                        Margin="0,0,0,10"
-                                        ToolTip="現在の設定を JSON として書き出します。"
-                                        Tag="現在の設定を JSON として書き出します。"
-                                        MouseEnter="SettingHelp_OnMouseEnter"
-                                        MouseLeave="SettingHelp_OnMouseLeave"
-                                        Click="ExportSettingsButton_OnClick" />
-                                <Button Content="設定インポート"
-                                        ToolTip="JSON ファイルから設定を読み込みます。"
-                                        Tag="JSON ファイルから設定を読み込みます。"
-                                        MouseEnter="SettingHelp_OnMouseEnter"
-                                        MouseLeave="SettingHelp_OnMouseLeave"
-                                        Click="ImportSettingsButton_OnClick" />
-                                <TextBlock Text="{Binding AppVersionText}"
-                                           Margin="0,12,0,0"
-                                           TextWrapping="Wrap"
-                                           Foreground="#D4DCE4" />
-                            </StackPanel>
-                        </GroupBox>
                     </Grid>
                 </ScrollViewer>
             </Border>

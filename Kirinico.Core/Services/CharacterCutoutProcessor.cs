@@ -5,9 +5,15 @@ namespace Kirinico.Core.Services;
 
 public sealed class CharacterCutoutProcessor
 {
+    private const double ProcessingSourceBlurSigma = 0.8d;
+    private const float OutlineAntialiasWidth = 1.0f;
     private const float ForegroundCandidateMargin = 48f;
     private const float ForegroundCandidateFloor = 96f;
     private const float SmallAlphaBlendStart = 0.35f;
+    private const float EdgeSmoothingBlend = 0.55f;
+    private const float LineColorBlendMax = 0.45f;
+    private const float LineColorSimilarityStart = 18f;
+    private const float LineColorSimilarityEnd = 72f;
 
     public RgbColor SampleBackgroundColor(Mat sourceBgr, Point center, int radius = 6)
     {
@@ -34,6 +40,16 @@ public sealed class CharacterCutoutProcessor
         ManualEditMaps? manualMaps = null,
         IProgress<ProcessingProgress>? progress = null)
     {
+        using var preResize = ProcessPreResize(sourceBgr, parameters, manualMaps, progress);
+        return FinalizeFromPreResize(preResize, parameters, progress);
+    }
+
+    public PreResizeCutoutResult ProcessPreResize(
+        Mat sourceBgr,
+        CutoutParameters parameters,
+        ManualEditMaps? manualMaps = null,
+        IProgress<ProcessingProgress>? progress = null)
+    {
         ArgumentNullException.ThrowIfNull(sourceBgr);
         ArgumentNullException.ThrowIfNull(parameters);
 
@@ -48,9 +64,10 @@ public sealed class CharacterCutoutProcessor
         }
 
         progress?.Report(new ProcessingProgress(6d, "背景シードを取得"));
+        using var processingSourceBgr = BuildProcessingSource(sourceBgr);
         var backgroundMode = parameters.BackgroundSpecificationMode;
         var seeds = backgroundMode == BackgroundSpecificationMode.ManualSeed
-            ? CollectBackgroundSeeds(sourceBgr, manualMaps?.BackgroundSeedAddMap)
+            ? CollectBackgroundSeeds(processingSourceBgr, manualMaps?.BackgroundSeedAddMap)
             : [];
         if (backgroundMode == BackgroundSpecificationMode.ManualSeed && seeds.Count == 0)
         {
@@ -60,7 +77,7 @@ public sealed class CharacterCutoutProcessor
         var background = ResolveBackgroundColor(parameters, seeds);
 
         progress?.Report(new ProcessingProgress(18d, "背景を連結推定"));
-        using var backgroundMask = BuildBackgroundMask(sourceBgr, seeds, background, parameters);
+        using var backgroundMask = BuildBackgroundMask(processingSourceBgr, seeds, background, parameters);
 
         progress?.Report(new ProcessingProgress(34d, "背景を整形"));
         CleanupBackgroundMask(backgroundMask, parameters);
@@ -70,24 +87,49 @@ public sealed class CharacterCutoutProcessor
         using var edgeField = BuildEdgeField(foregroundMask);
 
         progress?.Report(new ProcessingProgress(64d, "アルファを推定"));
-        using var alpha8 = BuildFinalAlpha(sourceBgr, foregroundMask, edgeField, background, parameters);
+        using var alphaResult = BuildFinalAlpha(processingSourceBgr, foregroundMask, edgeField, background, parameters);
 
         progress?.Report(new ProcessingProgress(78d, "前景色を復元"));
-        using var reconstructedForeground = ReconstructForegroundColors(sourceBgr, alpha8, background);
+        using var reconstructedForeground = ReconstructForegroundColors(
+            sourceBgr,
+            alphaResult.AlphaMask,
+            background,
+            alphaResult.LocalForegroundMap,
+            alphaResult.HasLocalForegroundMap,
+            alphaResult.LocalForegroundDistanceMap,
+            edgeField.InsideDistance,
+            parameters.LineColor);
 
-        progress?.Report(new ProcessingProgress(88d, "アルファを平滑化"));
-        SmoothAlpha(alpha8);
+        progress?.Report(new ProcessingProgress(88d, "輪郭を平滑化"));
+        SmoothEdgeAppearance(reconstructedForeground, alphaResult.AlphaMask);
 
-        var alphaPreview = alpha8.Clone();
-        using var straightBgra = ComposeStraightBgra(reconstructedForeground, alpha8);
+        var alphaPreview = alphaResult.AlphaMask.Clone();
+        var straightBgra = ComposeStraightBgra(reconstructedForeground, alphaResult.AlphaMask);
+        return new PreResizeCutoutResult(alphaPreview, straightBgra, background);
+    }
 
-        var targetSize = parameters.Resize.ResolveTargetSize(sourceBgr.Size());
+    public CutoutResult FinalizeFromPreResize(
+        PreResizeCutoutResult preResizeResult,
+        CutoutParameters parameters,
+        IProgress<ProcessingProgress>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(preResizeResult);
+        ArgumentNullException.ThrowIfNull(parameters);
+
+        var targetSize = parameters.Resize.ResolveTargetSize(preResizeResult.StraightBgra.Size());
         progress?.Report(new ProcessingProgress(96d, "リサイズと縁取りを適用"));
-        using var resizedStraight = ResizePremultiplied(straightBgra, targetSize);
+        using var resizedStraight = ResizePremultiplied(preResizeResult.StraightBgra, targetSize, parameters.Resize.Interpolation);
         var finalRgba = ApplyOutline(resizedStraight, parameters.Outline);
 
         progress?.Report(new ProcessingProgress(100d, "完了"));
-        return new CutoutResult(alphaPreview, finalRgba, background);
+        return new CutoutResult(preResizeResult.AlphaMask.Clone(), finalRgba, preResizeResult.ResolvedBackgroundColor);
+    }
+
+    private static Mat BuildProcessingSource(Mat sourceBgr)
+    {
+        var result = new Mat();
+        Cv2.GaussianBlur(sourceBgr, result, new Size(3, 3), ProcessingSourceBlurSigma, ProcessingSourceBlurSigma, BorderTypes.Reflect101);
+        return result;
     }
 
     private static List<SeedInfo> CollectBackgroundSeeds(Mat sourceBgr, Mat? backgroundSeedAddMap)
@@ -208,51 +250,15 @@ public sealed class CharacterCutoutProcessor
 
     private static Mat GrowBackgroundRegion(Mat sourceBgr, SeedInfo seed, float threshold)
     {
-        var result = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_8UC1, Scalar.Black);
-        var resultIndexer = result.GetGenericIndexer<byte>();
-        var sourceIndexer = sourceBgr.GetGenericIndexer<Vec3b>();
-        var visited = new bool[sourceBgr.Rows, sourceBgr.Cols];
-        var queue = new Queue<Point>();
-        queue.Enqueue(seed.Point);
-        visited[seed.Point.Y, seed.Point.X] = true;
+        using var mask = new Mat(sourceBgr.Rows + 2, sourceBgr.Cols + 2, MatType.CV_8UC1, Scalar.Black);
+        var seedColor = new Scalar(seed.Color.Item0, seed.Color.Item1, seed.Color.Item2);
+        var tolerance = new Scalar(threshold, threshold, threshold);
+        var flags = (FloodFillFlags)(8 | (255 << 8)) | FloodFillFlags.FixedRange | FloodFillFlags.MaskOnly;
+        Cv2.FloodFill(sourceBgr, mask, seed.Point, seedColor, out _, tolerance, tolerance, flags);
 
-        while (queue.Count > 0)
-        {
-            var point = queue.Dequeue();
-            if (ComputeColorDistance(sourceIndexer[point.Y, point.X], seed.Color) > threshold)
-            {
-                continue;
-            }
-
-            resultIndexer[point.Y, point.X] = 255;
-
-            for (var offsetY = -1; offsetY <= 1; offsetY++)
-            {
-                for (var offsetX = -1; offsetX <= 1; offsetX++)
-                {
-                    if (offsetX == 0 && offsetY == 0)
-                    {
-                        continue;
-                    }
-
-                    var nx = point.X + offsetX;
-                    var ny = point.Y + offsetY;
-                    if (nx < 0 || ny < 0 || nx >= sourceBgr.Cols || ny >= sourceBgr.Rows)
-                    {
-                        continue;
-                    }
-
-                    if (visited[ny, nx])
-                    {
-                        continue;
-                    }
-
-                    visited[ny, nx] = true;
-                    queue.Enqueue(new Point(nx, ny));
-                }
-            }
-        }
-
+        using var roi = new Mat(mask, new Rect(1, 1, sourceBgr.Cols, sourceBgr.Rows));
+        var result = new Mat();
+        Cv2.Compare(roi, Scalar.Black, result, CmpTypes.GT);
         return result;
     }
 
@@ -333,7 +339,7 @@ public sealed class CharacterCutoutProcessor
         return foregroundMask;
     }
 
-    private static Mat BuildFinalAlpha(
+    private static AlphaComputationResult BuildFinalAlpha(
         Mat sourceBgr,
         Mat foregroundMask,
         EdgeField edgeField,
@@ -346,12 +352,18 @@ public sealed class CharacterCutoutProcessor
         Cv2.Subtract(foregroundMask, stableInterior, innerBand);
 
         var alpha = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_8UC1, Scalar.Black);
+        var localForegroundMap = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_32FC3, Scalar.All(0d));
+        var hasLocalForegroundMap = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_8UC1, Scalar.Black);
+        var localForegroundDistanceMap = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_32FC1, Scalar.All(0d));
         stableInterior.CopyTo(alpha);
 
         var sourceIndexer = sourceBgr.GetGenericIndexer<Vec3b>();
         var bandIndexer = innerBand.GetGenericIndexer<byte>();
         var alphaIndexer = alpha.GetGenericIndexer<byte>();
         var maskIndexer = foregroundMask.GetGenericIndexer<byte>();
+        var localForegroundIndexer = localForegroundMap.GetGenericIndexer<Vec3f>();
+        var hasLocalForegroundIndexer = hasLocalForegroundMap.GetGenericIndexer<byte>();
+        var localForegroundDistanceIndexer = localForegroundDistanceMap.GetGenericIndexer<float>();
 
         var bgThreshold = ComputeBackgroundDistanceThreshold(parameters.Extraction);
         var fgThreshold = ComputeForegroundCandidateThreshold(bgThreshold);
@@ -366,10 +378,13 @@ public sealed class CharacterCutoutProcessor
                 }
 
                 var pixel = sourceIndexer[y, x];
-                if (TryEstimateLocalForegroundColor(sourceBgr, foregroundMask, edgeField, x, y, scanWidth, parameters.LinePolarity, background, fgThreshold, out var foregroundColor))
+                if (TryEstimateLocalForegroundColor(sourceBgr, foregroundMask, edgeField, x, y, scanWidth, parameters.LineColor, background, fgThreshold, out var foregroundColor, out var foregroundDistance))
                 {
                     var alphaValue = EstimateForegroundMixFactor(pixel, foregroundColor, background);
                     alphaIndexer[y, x] = ClampToByte(alphaValue * 255f);
+                    localForegroundIndexer[y, x] = foregroundColor;
+                    hasLocalForegroundIndexer[y, x] = 255;
+                    localForegroundDistanceIndexer[y, x] = foregroundDistance;
                 }
                 else
                 {
@@ -389,7 +404,7 @@ public sealed class CharacterCutoutProcessor
                 }
             }
         }
-        return alpha;
+        return new AlphaComputationResult(alpha, localForegroundMap, hasLocalForegroundMap, localForegroundDistanceMap);
     }
 
     private static Mat ErodeMask(Mat mask, int radius)
@@ -412,14 +427,17 @@ public sealed class CharacterCutoutProcessor
         int x,
         int y,
         int scanWidth,
-        LinePolarity polarity,
+        RgbColor? lineColor,
         RgbColor background,
         float foregroundThreshold,
-        out Vec3f foregroundColor)
+        out Vec3f foregroundColor,
+        out float foregroundDistance)
     {
         foregroundColor = default;
+        foregroundDistance = 0f;
         var sourceIndexer = sourceBgr.GetGenericIndexer<Vec3b>();
         var maskIndexer = foregroundMask.GetGenericIndexer<byte>();
+        var insideDistanceIndexer = edgeField.InsideDistance.GetGenericIndexer<float>();
         var gradXIndexer = edgeField.GradX.GetGenericIndexer<float>();
         var gradYIndexer = edgeField.GradY.GetGenericIndexer<float>();
 
@@ -468,13 +486,14 @@ public sealed class CharacterCutoutProcessor
             candidates.AddRange(windowCandidates);
         }
 
-        var best = SelectForegroundCandidate(candidates, polarity);
+        var best = SelectForegroundCandidate(candidates, lineColor);
         if (best is null)
         {
             return false;
         }
 
         foregroundColor = AverageCandidateNeighborhood(candidates, best.Value);
+        foregroundDistance = insideDistanceIndexer[best.Value.Y, best.Value.X];
         return true;
     }
 
@@ -522,7 +541,7 @@ public sealed class CharacterCutoutProcessor
         return result;
     }
 
-    private static Candidate? SelectForegroundCandidate(List<Candidate> candidates, LinePolarity polarity)
+    private static Candidate? SelectForegroundCandidate(List<Candidate> candidates, RgbColor? lineColor)
     {
         if (candidates.Count == 0)
         {
@@ -532,12 +551,9 @@ public sealed class CharacterCutoutProcessor
         Candidate best = candidates[0];
         foreach (var candidate in candidates)
         {
-            var better = polarity switch
-            {
-                LinePolarity.Black => candidate.Luma < best.Luma || (Math.Abs(candidate.Luma - best.Luma) < 0.001f && candidate.Distance > best.Distance),
-                LinePolarity.White => candidate.Luma > best.Luma || (Math.Abs(candidate.Luma - best.Luma) < 0.001f && candidate.Distance > best.Distance),
-                _ => candidate.Distance > best.Distance || (Math.Abs(candidate.Distance - best.Distance) < 0.001f && candidate.Step > best.Step),
-            };
+            var better = lineColor.HasValue
+                ? IsBetterLineColorCandidate(candidate, best, lineColor.Value)
+                : candidate.Distance > best.Distance || (Math.Abs(candidate.Distance - best.Distance) < 0.001f && candidate.Step > best.Step);
 
             if (better)
             {
@@ -546,6 +562,31 @@ public sealed class CharacterCutoutProcessor
         }
 
         return best;
+    }
+
+    private static bool IsBetterLineColorCandidate(Candidate candidate, Candidate best, RgbColor lineColor)
+    {
+        var candidateDistance = ComputeColorDistance(candidate.Pixel, lineColor);
+        var bestDistance = ComputeColorDistance(best.Pixel, lineColor);
+        if (candidateDistance < bestDistance - 0.001f)
+        {
+            return true;
+        }
+
+        if (Math.Abs(candidateDistance - bestDistance) < 0.001f)
+        {
+            if (candidate.Distance > best.Distance + 0.001f)
+            {
+                return true;
+            }
+
+            if (Math.Abs(candidate.Distance - best.Distance) < 0.001f && candidate.Step > best.Step)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Vec3f AverageCandidateNeighborhood(List<Candidate> candidates, Candidate best)
@@ -576,12 +617,24 @@ public sealed class CharacterCutoutProcessor
         return new Vec3f(sumB / count, sumG / count, sumR / count);
     }
 
-    private static Mat ReconstructForegroundColors(Mat sourceBgr, Mat alpha8, RgbColor background)
+    private static Mat ReconstructForegroundColors(
+        Mat sourceBgr,
+        Mat alpha8,
+        RgbColor background,
+        Mat localForegroundMap,
+        Mat hasLocalForegroundMap,
+        Mat localForegroundDistanceMap,
+        Mat insideDistance,
+        RgbColor? lineColor)
     {
         var reconstructed = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_8UC3, Scalar.Black);
         var sourceIndexer = sourceBgr.GetGenericIndexer<Vec3b>();
         var alphaIndexer = alpha8.GetGenericIndexer<byte>();
         var resultIndexer = reconstructed.GetGenericIndexer<Vec3b>();
+        var localForegroundIndexer = localForegroundMap.GetGenericIndexer<Vec3f>();
+        var hasLocalForegroundIndexer = hasLocalForegroundMap.GetGenericIndexer<byte>();
+        var localForegroundDistanceIndexer = localForegroundDistanceMap.GetGenericIndexer<float>();
+        var insideDistanceIndexer = insideDistance.GetGenericIndexer<float>();
 
         var bgB = background.B;
         var bgG = background.G;
@@ -617,6 +670,47 @@ public sealed class CharacterCutoutProcessor
                 reconstructedG = Lerp(observed.Item1, reconstructedG, stabilization);
                 reconstructedR = Lerp(observed.Item2, reconstructedR, stabilization);
 
+                var reconstructionBlend = 0f;
+                if (hasLocalForegroundIndexer[y, x] > 0)
+                {
+                    var foundDistance = localForegroundDistanceIndexer[y, x];
+                    if (foundDistance > 0.001f)
+                    {
+                        var currentDistance = insideDistanceIndexer[y, x];
+                        reconstructionBlend = currentDistance <= (foundDistance + 0.001f) ? 1f : 0f;
+                    }
+                }
+
+                reconstructedB = Lerp(observed.Item0, reconstructedB, reconstructionBlend);
+                reconstructedG = Lerp(observed.Item1, reconstructedG, reconstructionBlend);
+                reconstructedR = Lerp(observed.Item2, reconstructedR, reconstructionBlend);
+
+                if (lineColor.HasValue && hasLocalForegroundIndexer[y, x] > 0 && reconstructionBlend > 0f)
+                {
+                    var localForeground = localForegroundIndexer[y, x];
+                    var lineAffinity = 1f - SmoothStep(
+                        LineColorSimilarityStart,
+                        LineColorSimilarityEnd,
+                        ComputeColorDistance(localForeground, lineColor.Value));
+
+                    if (lineAffinity > 0f)
+                    {
+                        var lineBlend = lineAffinity * reconstructionBlend * LineColorBlendMax;
+                        if (lineBlend <= 0f)
+                        {
+                            resultIndexer[y, x] = new Vec3b(
+                                ClampToByte(reconstructedB),
+                                ClampToByte(reconstructedG),
+                                ClampToByte(reconstructedR));
+                            continue;
+                        }
+
+                        reconstructedB = Lerp(reconstructedB, lineColor.Value.B, lineBlend);
+                        reconstructedG = Lerp(reconstructedG, lineColor.Value.G, lineBlend);
+                        reconstructedR = Lerp(reconstructedR, lineColor.Value.R, lineBlend);
+                    }
+                }
+
                 resultIndexer[y, x] = new Vec3b(
                     ClampToByte(reconstructedB),
                     ClampToByte(reconstructedG),
@@ -627,23 +721,20 @@ public sealed class CharacterCutoutProcessor
         return reconstructed;
     }
 
-    private static void SmoothAlpha(Mat alpha)
+    private static void SmoothEdgeAppearance(Mat foregroundBgr, Mat alpha)
     {
-        using var blurred = new Mat();
-        Cv2.GaussianBlur(alpha, blurred, new Size(3, 3), 0.7d, 0.7d, BorderTypes.Reflect101);
         using var partialMask = new Mat();
         Cv2.InRange(alpha, new Scalar(1), new Scalar(254), partialMask);
-        using var expandedMask = new Mat();
-        using var kernel = CreateKernel(1);
-        Cv2.Dilate(partialMask, expandedMask, kernel);
-        if (!TryGetNonZeroBounds(expandedMask, out var bounds))
+        if (!TryGetNonZeroBounds(partialMask, out var bounds))
         {
             return;
         }
 
+        using var premultiplied = new Mat(foregroundBgr.Rows, foregroundBgr.Cols, MatType.CV_32FC4, Scalar.All(0d));
+        var foregroundIndexer = foregroundBgr.GetGenericIndexer<Vec3b>();
         var alphaIndexer = alpha.GetGenericIndexer<byte>();
-        var blurIndexer = blurred.GetGenericIndexer<byte>();
-        var maskIndexer = expandedMask.GetGenericIndexer<byte>();
+        var maskIndexer = partialMask.GetGenericIndexer<byte>();
+        var premultipliedIndexer = premultiplied.GetGenericIndexer<Vec4f>();
 
         for (var y = bounds.Top; y < bounds.Bottom; y++)
         {
@@ -654,7 +745,49 @@ public sealed class CharacterCutoutProcessor
                     continue;
                 }
 
-                alphaIndexer[y, x] = ClampToByte(Lerp(alphaIndexer[y, x], blurIndexer[y, x], 0.35f));
+                var foreground = foregroundIndexer[y, x];
+                var a = alphaIndexer[y, x] / 255f;
+                premultipliedIndexer[y, x] = new Vec4f(
+                    foreground.Item0 * a,
+                    foreground.Item1 * a,
+                    foreground.Item2 * a,
+                    alphaIndexer[y, x]);
+            }
+        }
+
+        using var blurredPremultiplied = new Mat();
+        Cv2.GaussianBlur(premultiplied, blurredPremultiplied, new Size(5, 5), 1.1d, 1.1d, BorderTypes.Reflect101);
+        var blurredIndexer = blurredPremultiplied.GetGenericIndexer<Vec4f>();
+
+        for (var y = bounds.Top; y < bounds.Bottom; y++)
+        {
+            for (var x = bounds.Left; x < bounds.Right; x++)
+            {
+                if (maskIndexer[y, x] == 0)
+                {
+                    continue;
+                }
+
+                var original = premultipliedIndexer[y, x];
+                var blurred = blurredIndexer[y, x];
+
+                var blendedAlpha = Lerp(original.Item3, blurred.Item3, EdgeSmoothingBlend);
+                alphaIndexer[y, x] = ClampToByte(blendedAlpha);
+
+                if (blendedAlpha <= 0.001f)
+                {
+                    foregroundIndexer[y, x] = default;
+                    continue;
+                }
+
+                var alphaScale = blendedAlpha / 255f;
+                var blendedB = Lerp(original.Item0, blurred.Item0, EdgeSmoothingBlend);
+                var blendedG = Lerp(original.Item1, blurred.Item1, EdgeSmoothingBlend);
+                var blendedR = Lerp(original.Item2, blurred.Item2, EdgeSmoothingBlend);
+                foregroundIndexer[y, x] = new Vec3b(
+                    ClampToByte(blendedB / MathF.Max(alphaScale, 0.0001f)),
+                    ClampToByte(blendedG / MathF.Max(alphaScale, 0.0001f)),
+                    ClampToByte(blendedR / MathF.Max(alphaScale, 0.0001f)));
             }
         }
     }
@@ -678,7 +811,7 @@ public sealed class CharacterCutoutProcessor
         return result;
     }
 
-    private static Mat ResizePremultiplied(Mat straightBgra, Size targetSize)
+    private static Mat ResizePremultiplied(Mat straightBgra, Size targetSize, ResizeInterpolationMode interpolation)
     {
         if (straightBgra.Size() == targetSize)
         {
@@ -704,8 +837,20 @@ public sealed class CharacterCutoutProcessor
         }
 
         using var resizedPremultiplied = new Mat();
-        Cv2.Resize(premultiplied, resizedPremultiplied, targetSize, 0d, 0d, InterpolationFlags.Lanczos4);
+        Cv2.Resize(premultiplied, resizedPremultiplied, targetSize, 0d, 0d, ToInterpolationFlags(interpolation));
         return ConvertPremultipliedToStraight(resizedPremultiplied);
+    }
+
+    private static InterpolationFlags ToInterpolationFlags(ResizeInterpolationMode interpolation)
+    {
+        return interpolation switch
+        {
+            ResizeInterpolationMode.Nearest => InterpolationFlags.Nearest,
+            ResizeInterpolationMode.Linear => InterpolationFlags.Linear,
+            ResizeInterpolationMode.Cubic => InterpolationFlags.Cubic,
+            ResizeInterpolationMode.Area => InterpolationFlags.Area,
+            _ => InterpolationFlags.Lanczos4,
+        };
     }
 
     private static Mat ConvertPremultipliedToStraight(Mat premultipliedBgra)
@@ -818,27 +963,26 @@ public sealed class CharacterCutoutProcessor
 
     private static float ComputeOutlineCoverage(byte sourceAlpha, float outsideDistance, float thickness)
     {
-        if (sourceAlpha >= 255)
+        if (sourceAlpha >= 255 || thickness <= 0f)
         {
             return 0f;
         }
 
-        var signedDistance = MathF.Max(0f, outsideDistance - 1f);
-        var feather = MathF.Max(0.75f, MathF.Min(1.5f, 0.55f + (thickness * 0.25f)));
-        var innerEdge = MathF.Max(0f, thickness - feather);
-        var outerEdge = thickness + feather;
-        if (signedDistance <= innerEdge)
+        // The discrete approximation treats the alpha>0.5 contour as lying halfway
+        // between the binary source pixel centers and the first outside pixel centers.
+        var distanceFromBoundary = MathF.Max(0f, outsideDistance - 0.5f);
+        if (distanceFromBoundary <= thickness)
         {
             return 1f;
         }
 
-        if (signedDistance >= outerEdge)
+        var aaEnd = thickness + OutlineAntialiasWidth;
+        if (distanceFromBoundary >= aaEnd)
         {
             return 0f;
         }
 
-        var t = 1f - ((signedDistance - innerEdge) / MathF.Max(0.0001f, outerEdge - innerEdge));
-        return t * t * (3f - (2f * t));
+        return 1f - ((distanceFromBoundary - thickness) / OutlineAntialiasWidth);
     }
 
     private static EdgeField BuildEdgeField(Mat foregroundMask)
@@ -855,8 +999,8 @@ public sealed class CharacterCutoutProcessor
         using var inverse = new Mat();
         Cv2.BitwiseNot(foregroundMask, inverse);
         var outsideDistance = outsideDistanceTarget ?? new Mat();
-        Cv2.DistanceTransform(foregroundMask, insideDistance, DistanceTypes.L2, DistanceTransformMasks.Mask3);
-        Cv2.DistanceTransform(inverse, outsideDistance, DistanceTypes.L2, DistanceTransformMasks.Mask3);
+        Cv2.DistanceTransform(foregroundMask, insideDistance, DistanceTypes.L2, DistanceTransformMasks.Mask5);
+        Cv2.DistanceTransform(inverse, outsideDistance, DistanceTypes.L2, DistanceTransformMasks.Mask5);
         Cv2.Subtract(insideDistance, outsideDistance, signedDistance);
         if (outsideDistanceTarget is null)
         {
@@ -947,6 +1091,14 @@ public sealed class CharacterCutoutProcessor
         return MathF.Sqrt((diffB * diffB) + (diffG * diffG) + (diffR * diffR));
     }
 
+    private static float ComputeColorDistance(Vec3f pixel, RgbColor reference)
+    {
+        var diffB = pixel.Item0 - reference.B;
+        var diffG = pixel.Item1 - reference.G;
+        var diffR = pixel.Item2 - reference.R;
+        return MathF.Sqrt((diffB * diffB) + (diffG * diffG) + (diffR * diffR));
+    }
+
     private static float ComputeLuma(Vec3b pixel) => (0.114f * pixel.Item0) + (0.587f * pixel.Item1) + (0.299f * pixel.Item2);
 
     private static float SmoothStep(float edge0, float edge1, float value)
@@ -981,6 +1133,33 @@ public sealed class CharacterCutoutProcessor
     private readonly record struct SeedInfo(Point Point, Vec3f Color);
 
     private readonly record struct Candidate(int Step, int X, int Y, Vec3b Pixel, float Distance, float Luma);
+
+    private sealed class AlphaComputationResult : IDisposable
+    {
+        public AlphaComputationResult(Mat alphaMask, Mat localForegroundMap, Mat hasLocalForegroundMap, Mat localForegroundDistanceMap)
+        {
+            AlphaMask = alphaMask;
+            LocalForegroundMap = localForegroundMap;
+            HasLocalForegroundMap = hasLocalForegroundMap;
+            LocalForegroundDistanceMap = localForegroundDistanceMap;
+        }
+
+        public Mat AlphaMask { get; }
+
+        public Mat LocalForegroundMap { get; }
+
+        public Mat HasLocalForegroundMap { get; }
+
+        public Mat LocalForegroundDistanceMap { get; }
+
+        public void Dispose()
+        {
+            AlphaMask.Dispose();
+            LocalForegroundMap.Dispose();
+            HasLocalForegroundMap.Dispose();
+            LocalForegroundDistanceMap.Dispose();
+        }
+    }
 
     private sealed class EdgeField : IDisposable
     {

@@ -24,6 +24,11 @@
                                        Height="64"
                                        Stretch="Fill"
                                        Source="{Binding PreviewImage}" />
+                                <StackPanel Margin="12,0,0,0"
+                                            VerticalAlignment="Center">
+                                    <TextBlock FontWeight="SemiBold"
+                                               Text="{Binding CoordinateText}" />
+                                </StackPanel>
                                 <Button Margin="12,0,0,0"
                                         Padding="12,6"
                                         VerticalAlignment="Center"

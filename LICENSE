@@ -41,6 +41,10 @@ SOFTWARE.
    License: Apache License 2.0
    Project: https://github.com/shimat/opencvsharp
 
+4. Material Symbols & Icons
+   License: Apache License 2.0
+   Project: https://github.com/google/material-design-icons
+
 --------------------------------------------------------------------------
 MIT License Text
 --------------------------------------------------------------------------
@@ -77,6 +81,7 @@ The following packages in the published application use the Apache License 2.0:
 
 - OpenCvSharp4 4.13.0.20260308
 - OpenCvSharp4.runtime.win 4.13.0.20260302
+- Material Symbols & Icons (used as the source for bundled PNG/cursor assets)
 
 Apache License
 Version 2.0, January 2004

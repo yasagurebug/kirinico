@@ -4,4 +4,5 @@ public enum ColorPickTarget
 {
     Outline,
     Background,
+    Line,
 }
