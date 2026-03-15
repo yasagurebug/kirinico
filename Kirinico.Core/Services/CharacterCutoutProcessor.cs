@@ -1049,7 +1049,7 @@ public sealed class CharacterCutoutProcessor
     private static float ComputeBackgroundDistanceThreshold(double extraction)
     {
         var t = (float)Math.Clamp(extraction, 0d, 1d);
-        return 12f + (108f * t);
+        return 120f * t;
     }
 
     private static float ComputeForegroundCandidateThreshold(float backgroundThreshold)

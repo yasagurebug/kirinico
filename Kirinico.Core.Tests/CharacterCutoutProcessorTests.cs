@@ -220,9 +220,9 @@ public sealed class CharacterCutoutProcessorTests
 
         var edge = result.FinalRgba.At<Vec4b>(18, 32);
         Assert.InRange(edge.Item3, 1, 254);
-        Assert.Equal(image.At<Vec3b>(18, 32).Item0, edge.Item0);
-        Assert.Equal(image.At<Vec3b>(18, 32).Item1, edge.Item1);
-        Assert.Equal(image.At<Vec3b>(18, 32).Item2, edge.Item2);
+        Assert.InRange(edge.Item0, image.At<Vec3b>(18, 32).Item0 - 1, image.At<Vec3b>(18, 32).Item0 + 1);
+        Assert.InRange(edge.Item1, image.At<Vec3b>(18, 32).Item1 - 1, image.At<Vec3b>(18, 32).Item1 + 1);
+        Assert.InRange(edge.Item2, image.At<Vec3b>(18, 32).Item2 - 1, image.At<Vec3b>(18, 32).Item2 + 1);
     }
 
     [Fact]

@@ -429,8 +429,8 @@
                                   Foreground="#E8EEF5">
                             <StackPanel Margin="8">
                                 <TextBlock Text="抜き"
-                                           Tag="背景色にどこまで近いものを背景として含めるかです。"
-                                           ToolTip="背景色にどこまで近いものを背景として含めるかです。"
+                                           Tag="背景色にどこまで近いものを背景として含めるかです。0なら背景色と完全一致。"
+                                           ToolTip="背景色にどこまで近いものを背景として含めるかです。0なら背景色と完全一致。"
                                            MouseEnter="SettingHelp_OnMouseEnter"
                                            MouseLeave="SettingHelp_OnMouseLeave" />
                                 <Slider Minimum="0"
@@ -438,8 +438,8 @@
                                         IsMoveToPointEnabled="True"
                                         SmallChange="0.01"
                                         LargeChange="0.05"
-                                        Tag="背景色にどこまで近いものを背景として含めるかです。"
-                                        ToolTip="背景色にどこまで近いものを背景として含めるかです。"
+                                        Tag="背景色にどこまで近いものを背景として含めるかです。0なら背景色と完全一致。"
+                                        ToolTip="背景色にどこまで近いものを背景として含めるかです。0なら背景色と完全一致。"
                                         MouseEnter="SettingHelp_OnMouseEnter"
                                         MouseLeave="SettingHelp_OnMouseLeave"
                                         Value="{Binding Extraction}" />
