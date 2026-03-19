@@ -23,7 +23,7 @@ public static class ToolbarCursorService
 
     private static IReadOnlyDictionary<EditorMode, Cursor> CreateCursorMap() => new Dictionary<EditorMode, Cursor>
     {
-        [EditorMode.Hand] = LoadCursor("hand.cur"),
+        [EditorMode.Hand] = Cursors.Arrow,
         [EditorMode.WandAddSeed] = LoadCursor("wand_add.cur"),
         [EditorMode.Eyedropper] = LoadCursor("dropper.cur"),
     };

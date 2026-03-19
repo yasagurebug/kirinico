@@ -72,13 +72,7 @@ public sealed class BatchImageProcessor
 
                     File.Copy(file, backupPath);
 
-                    using var seedMap = new Mat(source.Rows, source.Cols, MatType.CV_8UC1, Scalar.All(0d));
-                    seedMap.Set(0, 0, 255);
-                    using var manualMaps = new ManualEditMaps
-                    {
-                        BackgroundSeedAddMap = seedMap.Clone(),
-                    };
-                    using var result = _processor.Process(source, parameters, manualMaps);
+                    using var result = _processor.Process(source, parameters);
                     if (!Cv2.ImWrite(outputPath, result.FinalRgba))
                     {
                         throw new InvalidOperationException("PNG 出力を保存できませんでした。");

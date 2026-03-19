@@ -1,5 +1,26 @@
 #ifndef AppVersion
-#define AppVersion "1.0"
+#define CsprojPath AddBackslash(SourcePath) + "Kirinico.App\\Kirinico.App.csproj"
+#define CsprojHandle 0
+#define CsprojLine ""
+#define VersionTagStart "<Version>"
+#define VersionTagEnd "</Version>"
+#define public AppVersion ""
+
+#sub ReadAppVersionLine
+  #define CsprojLine = FileRead(CsprojHandle)
+  #if Pos(VersionTagStart, CsprojLine) > 0 && Pos(VersionTagEnd, CsprojLine) > Pos(VersionTagStart, CsprojLine)
+    #define public AppVersion = Copy(CsprojLine, Pos(VersionTagStart, CsprojLine) + Len(VersionTagStart), Pos(VersionTagEnd, CsprojLine) - (Pos(VersionTagStart, CsprojLine) + Len(VersionTagStart)))
+  #endif
+#endsub
+
+#for {CsprojHandle = FileOpen(CsprojPath); CsprojHandle && !FileEof(CsprojHandle) && AppVersion == ""; ""} ReadAppVersionLine
+#if CsprojHandle
+  #expr FileClose(CsprojHandle)
+#endif
+
+#if AppVersion == ""
+  #error Unable to read <Version> from Kirinico.App\Kirinico.App.csproj
+#endif
 #endif
 
 #ifndef PublishDir

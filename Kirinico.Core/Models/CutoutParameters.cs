@@ -6,15 +6,23 @@ public sealed class CutoutParameters
 
     public RgbColor BackgroundColor { get; set; } = new(255, 255, 255);
 
-    public double Extraction { get; set; } = 0.7d;
+    public double BackgroundTolerance { get; set; } = 0.5d;
 
-    public double NoiseRemoval { get; set; } = 0.35d;
+    public double ContourTolerance { get; set; } = 0.4d;
 
-    public int ScanWidth { get; set; } = 5;
+    public int MaxContourWidthPx { get; set; } = 32;
 
-    public RgbColor? LineColor { get; set; }
+    public double DenoiseStrength { get; set; } = 0.3d;
+
+    public double TransparencyCut { get; set; } = 0.15d;
+
+    public double EdgeCorrectionStrength { get; set; } = 0.5d;
+
+    public RgbColor? EdgeRepresentativeColor { get; set; }
 
     public ResizeOptions Resize { get; set; } = new();
 
     public OutlineOptions Outline { get; set; } = new();
+
+    public InternalSettings Internal { get; set; } = new();
 }

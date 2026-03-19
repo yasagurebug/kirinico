@@ -11,33 +11,48 @@ public sealed class AppSettingsSnapshot
         public int Y { get; set; }
     }
 
-    public BackgroundSpecificationMode BackgroundSpecificationMode { get; set; } = BackgroundSpecificationMode.ColorRange;
+    public sealed class UiSettingsSnapshot
+    {
+        public BackgroundSpecificationMode BackgroundSpecificationMode { get; set; } = BackgroundSpecificationMode.ColorRange;
 
-    public string BackgroundColorHex { get; set; } = "FFFFFF";
+        public string BackgroundColorHex { get; set; } = "FFFFFF";
 
-    public double Extraction { get; set; } = 0.7d;
+        public double BackgroundTolerance { get; set; } = 0.5d;
 
-    public double NoiseRemoval { get; set; } = 0.35d;
+        public double ContourTolerance { get; set; } = 0.4d;
 
-    public double ScanWidth { get; set; } = 5d;
+        public double MaxContourWidth { get; set; } = 0.1d;
 
-    public string LineColorHex { get; set; } = string.Empty;
+        public double DenoiseStrength { get; set; } = 0.3d;
 
-    public double ScalePercent { get; set; } = 100d;
+        public MattingMethod ContourInferenceMethod { get; set; } = MattingMethod.Cf;
 
-    public ResizeInterpolationMode ResizeInterpolation { get; set; } = ResizeInterpolationMode.Lanczos4;
+        public List<SeedPointSnapshot> BackgroundSeeds { get; set; } = [];
 
-    public int OutputWidth { get; set; }
+        public double TransparencyCut { get; set; } = 0.15d;
 
-    public int OutputHeight { get; set; }
+        public double EdgeCorrectionStrength { get; set; } = 0.5d;
 
-    public bool OutlineEnabled { get; set; }
+        public string? EdgeRepresentativeColorHex { get; set; }
 
-    public string OutlineColorHex { get; set; } = "000000";
+        public bool AutoReprocess { get; set; } = true;
 
-    public double OutlineThickness { get; set; } = 1d;
+        public ResizeInterpolationMode ResizeInterpolation { get; set; } = ResizeInterpolationMode.Lanczos4;
 
-    public bool AutoReprocess { get; set; } = true;
+        public double ScalePercent { get; set; } = 100d;
 
-    public List<SeedPointSnapshot> BackgroundSeeds { get; set; } = [];
+        public int OutputWidth { get; set; }
+
+        public int OutputHeight { get; set; }
+
+        public bool OutlineEnabled { get; set; }
+
+        public string OutlineColorHex { get; set; } = "000000";
+
+        public double OutlineThickness { get; set; } = 1d;
+    }
+
+    public UiSettingsSnapshot Ui { get; set; } = new();
+
+    public InternalSettings Internal { get; set; } = new();
 }

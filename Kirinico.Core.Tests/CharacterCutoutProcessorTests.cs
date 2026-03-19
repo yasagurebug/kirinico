@@ -6,6 +6,42 @@ namespace Kirinico.Core.Tests;
 
 public sealed class CharacterCutoutProcessorTests
 {
+    private sealed class CountingAlphaMatteEstimator : IAlphaMatteEstimator
+    {
+        public int CallCount { get; private set; }
+
+        public Mat EstimateAlpha(Mat referenceBgr, Mat trimapMask, MattingSettings settings)
+        {
+            CallCount++;
+            return trimapMask.Clone();
+        }
+
+        public void CancelCurrentRequest()
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class FakeAlphaMatteEstimator : IAlphaMatteEstimator
+    {
+        public Mat EstimateAlpha(Mat referenceBgr, Mat trimapMask, MattingSettings settings)
+        {
+            ArgumentNullException.ThrowIfNull(trimapMask);
+            return trimapMask.Clone();
+        }
+
+        public void CancelCurrentRequest()
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
     private static ResizeOptions DefaultResize() =>
         new()
         {
@@ -16,25 +52,38 @@ public sealed class CharacterCutoutProcessorTests
     private static CutoutParameters CreateParameters(
         BackgroundSpecificationMode backgroundSpecificationMode = BackgroundSpecificationMode.ManualSeed,
         RgbColor? backgroundColor = null,
-        double extraction = 0.7d,
-        double noiseRemoval = 0.3d,
-        int scanWidth = 2,
-        RgbColor? lineColor = null) =>
+        double backgroundTolerance = 0.5d,
+        double contourTolerance = 0.4d,
+        double denoiseStrength = 0.3d,
+        double transparencyCut = 0.15d,
+        double edgeCorrectionStrength = 0.5d,
+        int maxContourWidthPx = 32,
+        RgbColor? edgeColor = null) =>
         new()
         {
             BackgroundSpecificationMode = backgroundSpecificationMode,
             BackgroundColor = backgroundColor ?? new RgbColor(255, 255, 255),
-            Extraction = extraction,
-            NoiseRemoval = noiseRemoval,
-            ScanWidth = scanWidth,
-            LineColor = lineColor,
+            BackgroundTolerance = backgroundTolerance,
+            ContourTolerance = contourTolerance,
+            MaxContourWidthPx = maxContourWidthPx,
+            DenoiseStrength = denoiseStrength,
+            TransparencyCut = transparencyCut,
+            EdgeCorrectionStrength = edgeCorrectionStrength,
+            EdgeRepresentativeColor = edgeColor,
             Resize = DefaultResize(),
         };
 
-    private static ManualEditMaps CreateDefaultSeedMaps(Mat image)
+    private static CharacterCutoutProcessor CreateProcessor(IAlphaMatteEstimator? alphaMatteEstimator = null)
+        => new(alphaMatteEstimator ?? new FakeAlphaMatteEstimator());
+
+    private static ManualEditMaps CreateSeedMaps(Mat image, params Point[] points)
     {
         var seedMap = new Mat(image.Rows, image.Cols, MatType.CV_8UC1, Scalar.All(0d));
-        seedMap.Set(0, 0, 255);
+        foreach (var point in points)
+        {
+            seedMap.Set(point.Y, point.X, 255);
+        }
+
         return new ManualEditMaps
         {
             BackgroundSeedAddMap = seedMap,
@@ -47,182 +96,180 @@ public sealed class CharacterCutoutProcessorTests
         using var image = new Mat(5, 5, MatType.CV_8UC3, new Scalar(20, 30, 40));
         image.Set(2, 2, new Vec3b(100, 110, 120));
 
-        var processor = new CharacterCutoutProcessor();
+        using var processor = CreateProcessor();
         var sampled = processor.SampleBackgroundColor(image, new Point(2, 2), radius: 0);
 
         Assert.Equal(new RgbColor(120, 110, 100), sampled);
     }
 
     [Fact]
-    public void Process_ProducesOpaqueForegroundAndTransparentBackgroundForSimpleRectangle()
+    public void Process_ColorRangeMode_ProducesForegroundAndBackground()
     {
         using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
-        Cv2.Rectangle(image, new Rect(18, 18, 28, 28), new Scalar(10, 20, 30), -1);
+        Cv2.Rectangle(image, new Rect(18, 18, 28, 28), new Scalar(12, 24, 36), -1);
 
-        var processor = new CharacterCutoutProcessor();
-        using var seedMaps = CreateDefaultSeedMaps(image);
-        using var result = processor.Process(image, CreateParameters(), seedMaps);
+        using var processor = CreateProcessor();
+        using var result = processor.Process(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 0.2d,
+                contourTolerance: 0.0d));
 
-        Assert.True(result.AlphaMask.Get<byte>(32, 32) > 200);
-        Assert.True(result.AlphaMask.Get<byte>(4, 4) < 32);
+        Assert.True(result.AlphaMask.Get<byte>(32, 32) >= 120);
+        Assert.True(result.AlphaMask.Get<byte>(4, 4) <= 16);
+        Assert.True(result.TrimapMask.Get<byte>(32, 32) >= 120);
+        Assert.Equal(0, result.TrimapMask.Get<byte>(4, 4));
     }
 
     [Fact]
-    public void Process_AdditionalBackgroundSeedCanMarkEnclosedHoleAsBackground()
+    public void Process_ColorRangeMode_StrongColorDifferenceNearBackgroundCanRemainUnknownAtMaxContourTolerance()
+    {
+        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(1, 1, 10, 10), new Scalar(0, 0, 0), -1);
+
+        using var processor = CreateProcessor();
+        using var result = processor.Process(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 0.2d,
+                contourTolerance: 1.0d,
+                denoiseStrength: 0.0d));
+
+        Assert.Equal(128, result.TrimapMask.Get<byte>(5, 5));
+    }
+
+    [Fact]
+    public void ProcessPreResize_SkipsPyMattingWhenTrimapHasTooFewUnknownPixels()
+    {
+        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(16, 16, 32, 32), new Scalar(0, 0, 0), -1);
+
+        using var estimator = new CountingAlphaMatteEstimator();
+        using var processor = CreateProcessor(estimator);
+        using var preResize = processor.ProcessPreResize(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 0.2d,
+                contourTolerance: 0.0d,
+                denoiseStrength: 0.0d));
+
+        Assert.Equal(0, estimator.CallCount);
+        Assert.Equal(255, preResize.AlphaMask.Get<byte>(32, 32));
+        Assert.Equal(0, preResize.AlphaMask.Get<byte>(4, 4));
+    }
+
+    [Fact]
+    public void PrepareTrimap_DoesNotInvokeAlphaMatting()
+    {
+        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(16, 16, 32, 32), new Scalar(0, 0, 0), -1);
+
+        using var estimator = new CountingAlphaMatteEstimator();
+        using var processor = CreateProcessor(estimator);
+        using var prepared = processor.PrepareTrimap(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 0.2d,
+                contourTolerance: 0.4d,
+                denoiseStrength: 0.0d));
+
+        Assert.Equal(0, estimator.CallCount);
+        Assert.Equal(image.Size(), prepared.TrimapMask.Size());
+        Assert.Equal(image.Size(), prepared.ReferenceBgr.Size());
+        Assert.Equal(image.Size(), prepared.OriginalBgr.Size());
+    }
+
+    [Fact]
+    public void Process_ColorRangeMode_MinBackgroundRemovalDoesNotImmediatelyClassifyNearBackgroundPixelAsBackground()
+    {
+        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(31, 31, 3, 3), new Scalar(255, 255, 252), -1);
+
+        using var processor = CreateProcessor();
+        using var weakResult = processor.Process(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 0.0d,
+                denoiseStrength: 0.0d,
+                contourTolerance: 0.0d));
+        using var strongResult = processor.Process(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 1.0d,
+                denoiseStrength: 0.0d,
+                contourTolerance: 0.0d));
+
+        Assert.NotEqual(0, weakResult.TrimapMask.Get<byte>(32, 32));
+        Assert.Equal(0, strongResult.TrimapMask.Get<byte>(32, 32));
+    }
+
+    [Fact]
+    public void Process_ManualSeedMode_CanMarkEnclosedHoleAsBackground()
     {
         using var image = new Mat(96, 96, MatType.CV_8UC3, new Scalar(255, 255, 255));
         Cv2.Circle(image, new Point(48, 48), 28, new Scalar(20, 20, 20), 8);
 
-        using var seedMaps = CreateDefaultSeedMaps(image);
-        seedMaps.BackgroundSeedAddMap!.Set(48, 48, 255);
+        using var seeds = CreateSeedMaps(image, new Point(0, 0), new Point(48, 48));
+        using var processor = CreateProcessor();
+        using var result = processor.Process(
+            image,
+            CreateParameters(backgroundTolerance: 0.2d),
+            seeds);
 
-        var processor = new CharacterCutoutProcessor();
-        using var result = processor.Process(image, CreateParameters(extraction: 0.2d), seedMaps);
-
-        Assert.True(result.AlphaMask.Get<byte>(48, 48) < 32);
-        Assert.True(result.AlphaMask.Get<byte>(48, 20) > 64);
+        Assert.True(result.AlphaMask.Get<byte>(48, 48) <= 16);
+        Assert.True(result.AlphaMask.Get<byte>(48, 20) >= 120);
     }
 
     [Fact]
-    public void Process_ThrowsWhenNoBackgroundSeedExists()
+    public void Process_ContourToleranceControlsUnknownBandThickness()
+    {
+        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(31, 31, 3, 3), new Scalar(250, 250, 250), -1);
+
+        using var processor = CreateProcessor();
+        using var minWidthResult = processor.Process(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 0.0d,
+                denoiseStrength: 0.0d,
+                contourTolerance: 0.0d));
+        using var maxWidthResult = processor.Process(
+            image,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                backgroundTolerance: 0.0d,
+                denoiseStrength: 0.0d,
+                contourTolerance: 1.0d));
+
+        Assert.Equal(255, minWidthResult.TrimapMask.Get<byte>(32, 32));
+        Assert.Equal(128, maxWidthResult.TrimapMask.Get<byte>(32, 32));
+    }
+
+    [Fact]
+    public void Process_ThrowsWhenNoBackgroundSeedExistsInManualSeedMode()
     {
         using var image = new Mat(32, 32, MatType.CV_8UC3, new Scalar(255, 255, 255));
         Cv2.Rectangle(image, new Rect(8, 8, 16, 16), new Scalar(16, 16, 16), -1);
         using var emptySeed = new Mat(32, 32, MatType.CV_8UC1, Scalar.All(0d));
+        using var manualMaps = new ManualEditMaps { BackgroundSeedAddMap = emptySeed.Clone() };
+        using var processor = CreateProcessor();
 
-        var processor = new CharacterCutoutProcessor();
-        Assert.Throws<InvalidOperationException>(() =>
-            processor.Process(
-                image,
-                CreateParameters(),
-                new ManualEditMaps { BackgroundSeedAddMap = emptySeed.Clone() }));
-    }
-
-    [Fact]
-    public void Process_ColorRangeModeDoesNotRequireBackgroundSeed()
-    {
-        using var image = new Mat(48, 48, MatType.CV_8UC3, new Scalar(255, 255, 255));
-        Cv2.Rectangle(image, new Rect(12, 12, 24, 24), new Scalar(16, 16, 16), -1);
-
-        var processor = new CharacterCutoutProcessor();
-        using var result = processor.Process(
-            image,
-            CreateParameters(
-                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
-                backgroundColor: new RgbColor(255, 255, 255),
-                extraction: 0.2d));
-
-        Assert.True(result.AlphaMask.Get<byte>(24, 24) > 200);
-        Assert.True(result.AlphaMask.Get<byte>(4, 4) < 16);
-    }
-
-    [Fact]
-    public void Process_ColorRangeModeIgnoresManualSeeds()
-    {
-        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
-        Cv2.Rectangle(image, new Rect(18, 18, 28, 28), new Scalar(32, 32, 32), -1);
-
-        using var seedMaps = new ManualEditMaps
-        {
-            BackgroundSeedAddMap = new Mat(64, 64, MatType.CV_8UC1, Scalar.All(0d)),
-        };
-        seedMaps.BackgroundSeedAddMap!.Set(32, 32, 255);
-
-        var processor = new CharacterCutoutProcessor();
-        using var result = processor.Process(
-            image,
-            CreateParameters(
-                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
-                backgroundColor: new RgbColor(255, 255, 255),
-                extraction: 0.2d),
-            seedMaps);
-
-        Assert.True(result.AlphaMask.Get<byte>(32, 32) > 200);
-        Assert.True(result.AlphaMask.Get<byte>(4, 4) < 16);
-    }
-
-    [Fact]
-    public void Process_HigherExtraction_MonotonicallyReducesBrightBoundaryAlpha()
-    {
-        using var image = new Mat(100, 100, MatType.CV_8UC3, new Scalar(255, 255, 255));
-        Cv2.Rectangle(image, new Rect(28, 28, 44, 44), new Scalar(228, 228, 228), -1);
-        Cv2.Rectangle(image, new Rect(30, 30, 40, 40), new Scalar(18, 24, 30), -1);
-
-        var processor = new CharacterCutoutProcessor();
-        using var seedMapsA = CreateDefaultSeedMaps(image);
-        using var lowExtraction = processor.Process(image, CreateParameters(extraction: 0d), seedMapsA);
-
-        using var seedMapsB = CreateDefaultSeedMaps(image);
-        using var defaultExtraction = processor.Process(image, CreateParameters(extraction: 0.7d), seedMapsB);
-
-        using var seedMapsC = CreateDefaultSeedMaps(image);
-        using var maxExtraction = processor.Process(image, CreateParameters(extraction: 1d), seedMapsC);
-
-        var edgeLow = lowExtraction.AlphaMask.Get<byte>(29, 50);
-        var edgeDefault = defaultExtraction.AlphaMask.Get<byte>(29, 50);
-        var edgeMax = maxExtraction.AlphaMask.Get<byte>(29, 50);
-
-        Assert.True(edgeLow >= edgeDefault, $"Expected extraction to be monotonic. low={edgeLow}, default={edgeDefault}");
-        Assert.True(edgeDefault >= edgeMax, $"Expected stronger extraction to remove at least as much boundary alpha. default={edgeDefault}, max={edgeMax}");
-        Assert.True(defaultExtraction.AlphaMask.Get<byte>(50, 50) > 200);
-    }
-
-    [Fact]
-    public void Process_HigherExtraction_IsMonotonicOnGreenBackground()
-    {
-        using var image = new Mat(100, 100, MatType.CV_8UC3, new Scalar(48, 224, 48));
-        Cv2.Rectangle(image, new Rect(28, 28, 44, 44), new Scalar(64, 214, 64), -1);
-        Cv2.Rectangle(image, new Rect(30, 30, 40, 40), new Scalar(24, 32, 224), -1);
-
-        var processor = new CharacterCutoutProcessor();
-        using var seedMapsA = CreateDefaultSeedMaps(image);
-        using var lowExtraction = processor.Process(image, CreateParameters(extraction: 0d), seedMapsA);
-
-        using var seedMapsB = CreateDefaultSeedMaps(image);
-        using var defaultExtraction = processor.Process(image, CreateParameters(extraction: 0.7d), seedMapsB);
-
-        using var seedMapsC = CreateDefaultSeedMaps(image);
-        using var maxExtraction = processor.Process(image, CreateParameters(extraction: 1d), seedMapsC);
-
-        var edgeLow = lowExtraction.AlphaMask.Get<byte>(29, 50);
-        var edgeDefault = defaultExtraction.AlphaMask.Get<byte>(29, 50);
-        var edgeMax = maxExtraction.AlphaMask.Get<byte>(29, 50);
-
-        Assert.True(edgeLow >= edgeDefault, $"Expected extraction to be monotonic on green background. low={edgeLow}, default={edgeDefault}");
-        Assert.True(edgeDefault >= edgeMax, $"Expected stronger extraction to remove at least as much edge alpha on green background. default={edgeDefault}, max={edgeMax}");
-        Assert.True(defaultExtraction.AlphaMask.Get<byte>(50, 50) > 200);
-    }
-
-    [Fact]
-    public void Process_LineColorGuidancePreservesDarkOutline()
-    {
-        using var image = new Mat(96, 96, MatType.CV_8UC3, new Scalar(255, 255, 255));
-        Cv2.Rectangle(image, new Rect(22, 22, 52, 52), new Scalar(24, 24, 24), 3);
-        Cv2.Rectangle(image, new Rect(26, 26, 44, 44), new Scalar(210, 160, 120), -1);
-
-        var processor = new CharacterCutoutProcessor();
-        using var seedMaps = CreateDefaultSeedMaps(image);
-        using var result = processor.Process(image, CreateParameters(scanWidth: 3, lineColor: new RgbColor(24, 24, 24)), seedMaps);
-
-        Assert.True(result.AlphaMask.Get<byte>(23, 48) > 80);
-        Assert.True(result.FinalRgba.At<Vec4b>(23, 48).Item3 > 80);
-    }
-
-    [Fact]
-    public void Process_WhenLocalForegroundIsUnavailable_PreservesObservedColor()
-    {
-        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
-        Cv2.Rectangle(image, new Rect(18, 18, 28, 28), new Scalar(220, 220, 220), -1);
-
-        var processor = new CharacterCutoutProcessor();
-        using var seedMaps = CreateDefaultSeedMaps(image);
-        using var result = processor.Process(image, CreateParameters(extraction: 0d, scanWidth: 2), seedMaps);
-
-        var edge = result.FinalRgba.At<Vec4b>(18, 32);
-        Assert.InRange(edge.Item3, 1, 254);
-        Assert.InRange(edge.Item0, image.At<Vec3b>(18, 32).Item0 - 1, image.At<Vec3b>(18, 32).Item0 + 1);
-        Assert.InRange(edge.Item1, image.At<Vec3b>(18, 32).Item1 - 1, image.At<Vec3b>(18, 32).Item1 + 1);
-        Assert.InRange(edge.Item2, image.At<Vec3b>(18, 32).Item2 - 1, image.At<Vec3b>(18, 32).Item2 + 1);
+        Assert.Throws<InvalidOperationException>(() => processor.Process(image, CreateParameters(), manualMaps));
     }
 
     [Fact]
@@ -232,7 +279,12 @@ public sealed class CharacterCutoutProcessorTests
         Cv2.Rectangle(image, new Rect(18, 18, 44, 44), new Scalar(32, 48, 64), 2);
         Cv2.Rectangle(image, new Rect(21, 21, 38, 38), new Scalar(100, 150, 210), -1);
 
-        var parameters = CreateParameters(scanWidth: 3, lineColor: new RgbColor(64, 48, 32));
+        var parameters = CreateParameters(
+            backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+            backgroundColor: new RgbColor(255, 255, 255),
+            backgroundTolerance: 0.2d,
+            contourTolerance: 0.4d,
+            edgeColor: new RgbColor(64, 48, 32));
         parameters.Resize.ScalePercent = 150d;
         parameters.Outline = new OutlineOptions
         {
@@ -241,21 +293,23 @@ public sealed class CharacterCutoutProcessorTests
             Thickness = 1.5d,
         };
 
-        var processor = new CharacterCutoutProcessor();
-        using var seedMapsA = CreateDefaultSeedMaps(image);
-        using var direct = processor.Process(image, parameters, seedMapsA);
-
-        using var seedMapsB = CreateDefaultSeedMaps(image);
-        using var preResize = processor.ProcessPreResize(image, parameters, seedMapsB);
+        using var processor = CreateProcessor();
+        using var direct = processor.Process(image, parameters);
+        using var preResize = processor.ProcessPreResize(image, parameters);
         using var finalized = processor.FinalizeFromPreResize(preResize, parameters);
 
         Assert.Equal(direct.ResolvedBackgroundColor, finalized.ResolvedBackgroundColor);
         Assert.Equal(direct.AlphaMask.Size(), finalized.AlphaMask.Size());
+        Assert.Equal(direct.TrimapMask.Size(), finalized.TrimapMask.Size());
         Assert.Equal(direct.FinalRgba.Size(), finalized.FinalRgba.Size());
 
         using var alphaDiff = new Mat();
         Cv2.Absdiff(direct.AlphaMask, finalized.AlphaMask, alphaDiff);
         Assert.Equal(0, Cv2.CountNonZero(alphaDiff));
+
+        using var trimapDiff = new Mat();
+        Cv2.Absdiff(direct.TrimapMask, finalized.TrimapMask, trimapDiff);
+        Assert.Equal(0, Cv2.CountNonZero(trimapDiff));
 
         using var rgbaDiff = new Mat();
         Cv2.Absdiff(direct.FinalRgba, finalized.FinalRgba, rgbaDiff);
@@ -270,21 +324,148 @@ public sealed class CharacterCutoutProcessorTests
     }
 
     [Fact]
-    public void Process_SmoothingDoesNotBlurStableInteriorColor()
+    public void PrepareTrimap_MatchesProcessPreResizeTrimap()
     {
-        using var image = new Mat(96, 96, MatType.CV_8UC3, new Scalar(255, 255, 255));
-        Cv2.Rectangle(image, new Rect(22, 22, 52, 52), new Scalar(32, 32, 32), 2);
-        Cv2.Rectangle(image, new Rect(25, 25, 46, 46), new Scalar(90, 140, 210), -1);
+        using var image = new Mat(80, 80, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(18, 18, 44, 44), new Scalar(32, 48, 64), 2);
+        Cv2.Rectangle(image, new Rect(21, 21, 38, 38), new Scalar(100, 150, 210), -1);
 
-        var processor = new CharacterCutoutProcessor();
-        using var seedMaps = CreateDefaultSeedMaps(image);
-        using var result = processor.Process(image, CreateParameters(scanWidth: 3, lineColor: new RgbColor(32, 32, 32)), seedMaps);
+        var parameters = CreateParameters(
+            backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+            backgroundColor: new RgbColor(255, 255, 255),
+            backgroundTolerance: 0.2d,
+            contourTolerance: 0.4d,
+            edgeColor: new RgbColor(64, 48, 32));
 
-        var center = result.FinalRgba.At<Vec4b>(48, 48);
-        Assert.Equal(255, center.Item3);
-        Assert.Equal(90, center.Item0);
-        Assert.Equal(140, center.Item1);
-        Assert.Equal(210, center.Item2);
+        using var processor = CreateProcessor();
+        using var prepared = processor.PrepareTrimap(image, parameters);
+        using var preResize = processor.ProcessPreResize(image, parameters);
+        using var trimapDiff = new Mat();
+        Cv2.Absdiff(prepared.TrimapMask, preResize.TrimapMask, trimapDiff);
+        Assert.Equal(0, Cv2.CountNonZero(trimapDiff));
+    }
+
+    [Fact]
+    public void FinalizeFromPreResize_EdgeCorrectionPullsSemiTransparentPixelTowardRepresentativeColor()
+    {
+        using var original = new Mat(1, 1, MatType.CV_8UC3, new Scalar(180, 180, 180));
+        using var trimap = new Mat(1, 1, MatType.CV_8UC1, Scalar.All(128));
+        using var alpha = new Mat(1, 1, MatType.CV_8UC1, Scalar.All(128));
+        using var preResize = new PreResizeCutoutResult(trimap.Clone(), alpha.Clone(), original.Clone(), new RgbColor(255, 255, 255));
+
+        using var processor = CreateProcessor();
+
+        using var plain = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 0.0d,
+                edgeColor: null));
+
+        using var corrected = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 1.0d,
+                edgeColor: new RgbColor(0, 0, 0)));
+
+        var plainPixel = plain.FinalRgba.At<Vec4b>(0, 0);
+        var correctedPixel = corrected.FinalRgba.At<Vec4b>(0, 0);
+
+        Assert.True(correctedPixel.Item0 < plainPixel.Item0);
+        Assert.True(correctedPixel.Item1 < plainPixel.Item1);
+        Assert.True(correctedPixel.Item2 < plainPixel.Item2);
+        Assert.Equal(plainPixel.Item3, correctedPixel.Item3);
+    }
+
+    [Fact]
+    public void FinalizeFromPreResize_LowAlphaRepresentativeColorCorrectionIsStrongBelowHalfAlpha()
+    {
+        using var original = new Mat(1, 1, MatType.CV_8UC3, new Scalar(90, 170, 110));
+        using var trimap = new Mat(1, 1, MatType.CV_8UC1, Scalar.All(128));
+        using var alpha = new Mat(1, 1, MatType.CV_8UC1, Scalar.All(77));
+        using var preResize = new PreResizeCutoutResult(trimap.Clone(), alpha.Clone(), original.Clone(), new RgbColor(0, 255, 0));
+
+        using var processor = CreateProcessor();
+
+        using var plain = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(0, 255, 0),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 0.0d,
+                edgeColor: null));
+
+        using var medium = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(0, 255, 0),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 0.5d,
+                edgeColor: new RgbColor(0, 0, 0)));
+
+        using var strong = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(0, 255, 0),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 1.0d,
+                edgeColor: new RgbColor(0, 0, 0)));
+
+        var plainPixel = plain.FinalRgba.At<Vec4b>(0, 0);
+        var mediumPixel = medium.FinalRgba.At<Vec4b>(0, 0);
+        var strongPixel = strong.FinalRgba.At<Vec4b>(0, 0);
+
+        var plainMagnitude = plainPixel.Item0 + plainPixel.Item1 + plainPixel.Item2;
+        var mediumMagnitude = mediumPixel.Item0 + mediumPixel.Item1 + mediumPixel.Item2;
+        var strongMagnitude = strongPixel.Item0 + strongPixel.Item1 + strongPixel.Item2;
+
+        Assert.True(mediumMagnitude < plainMagnitude);
+        Assert.True(strongMagnitude < mediumMagnitude);
+    }
+
+    [Fact]
+    public void FinalizeFromPreResize_DespillIsFixedAndIndependentOfEdgeCorrectionStrength()
+    {
+        using var original = new Mat(1, 1, MatType.CV_8UC3, new Scalar(48, 220, 140));
+        using var trimap = new Mat(1, 1, MatType.CV_8UC1, Scalar.All(255));
+        using var alpha = new Mat(1, 1, MatType.CV_8UC1, Scalar.All(230));
+        using var preResize = new PreResizeCutoutResult(trimap.Clone(), alpha.Clone(), original.Clone(), new RgbColor(0, 255, 0));
+
+        using var processor = CreateProcessor();
+
+        using var weak = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(0, 255, 0),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 0.0d,
+                edgeColor: null));
+
+        using var strong = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(0, 255, 0),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 1.0d,
+                edgeColor: null));
+
+        var weakPixel = weak.FinalRgba.At<Vec4b>(0, 0);
+        var strongPixel = strong.FinalRgba.At<Vec4b>(0, 0);
+        var alphaFloat = 230f / 255f;
+        var naiveRestoredG = (220f - ((1f - alphaFloat) * 255f)) / alphaFloat;
+
+        Assert.Equal(weakPixel, strongPixel);
+        Assert.True(weakPixel.Item1 < naiveRestoredG);
     }
 
     [Fact]
@@ -293,15 +474,25 @@ public sealed class CharacterCutoutProcessorTests
         using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
         Cv2.Rectangle(image, new Rect(20, 20, 24, 24), new Scalar(20, 20, 20), -1);
 
-        var processor = new CharacterCutoutProcessor();
-        using var seedMaps = CreateDefaultSeedMaps(image);
-        using var result = processor.Process(
+        using var processor = CreateProcessor();
+        using var plain = processor.Process(
             image,
             new CutoutParameters
             {
-                Extraction = 0.7d,
-                NoiseRemoval = 0.3d,
-                ScanWidth = 2,
+                BackgroundSpecificationMode = BackgroundSpecificationMode.ColorRange,
+                BackgroundColor = new RgbColor(255, 255, 255),
+                BackgroundTolerance = 0.2d,
+                ContourTolerance = 0.0d,
+                Resize = DefaultResize(),
+            });
+        using var outlined = processor.Process(
+            image,
+            new CutoutParameters
+            {
+                BackgroundSpecificationMode = BackgroundSpecificationMode.ColorRange,
+                BackgroundColor = new RgbColor(255, 255, 255),
+                BackgroundTolerance = 0.2d,
+                ContourTolerance = 0.0d,
                 Resize = DefaultResize(),
                 Outline = new OutlineOptions
                 {
@@ -309,14 +500,131 @@ public sealed class CharacterCutoutProcessorTests
                     Color = new RgbColor(0, 0, 0),
                     Thickness = 2.25d,
                 },
-            },
-            seedMaps);
+            });
 
-        var solidOutlineAlpha = result.FinalRgba.At<Vec4b>(19, 32).Item3;
-        var featherOutlineAlpha = result.FinalRgba.At<Vec4b>(17, 32).Item3;
-        Assert.True(solidOutlineAlpha > 0);
-        Assert.Equal(255, solidOutlineAlpha);
-        Assert.True(featherOutlineAlpha > 0);
-        Assert.True(featherOutlineAlpha < 255);
+        var plainOuterAlphaCount = 0;
+        var outlinedOuterAlphaCount = 0;
+        for (var y = 17; y <= 46; y++)
+        {
+            for (var x = 17; x <= 46; x++)
+            {
+                var insideOriginal = x >= 20 && x <= 43 && y >= 20 && y <= 43;
+                if (insideOriginal)
+                {
+                    continue;
+                }
+
+                if (plain.FinalRgba.At<Vec4b>(y, x).Item3 > 0)
+                {
+                    plainOuterAlphaCount++;
+                }
+
+                if (outlined.FinalRgba.At<Vec4b>(y, x).Item3 > 0)
+                {
+                    outlinedOuterAlphaCount++;
+                }
+            }
+        }
+
+        Assert.True(outlinedOuterAlphaCount > plainOuterAlphaCount);
     }
+
+    [Fact]
+    public void FinalizeFromPreResize_OutlineStartsFromAnyNonZeroAlpha()
+    {
+        using var image = new Mat(64, 64, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        Cv2.Rectangle(image, new Rect(20, 20, 24, 24), new Scalar(20, 20, 20), -1);
+
+        using var trimap = new Mat(64, 64, MatType.CV_8UC1, Scalar.All(0d));
+        using var alpha = new Mat(64, 64, MatType.CV_8UC1, Scalar.All(0d));
+        Cv2.Rectangle(trimap, new Rect(20, 20, 24, 24), new Scalar(255), -1);
+        Cv2.Rectangle(alpha, new Rect(20, 20, 24, 24), new Scalar(64), -1);
+
+        using var preResize = new PreResizeCutoutResult(trimap.Clone(), alpha.Clone(), image.Clone(), new RgbColor(255, 255, 255));
+        using var processor = CreateProcessor();
+        using var plain = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(255, 255, 255),
+                transparencyCut: 0.0d,
+                contourTolerance: 0.0d));
+        using var outlined = processor.FinalizeFromPreResize(
+            preResize,
+            new CutoutParameters
+            {
+                BackgroundSpecificationMode = BackgroundSpecificationMode.ColorRange,
+                BackgroundColor = new RgbColor(255, 255, 255),
+                TransparencyCut = 0.0d,
+                ContourTolerance = 0.0d,
+                Resize = DefaultResize(),
+                Outline = new OutlineOptions
+                {
+                    Enabled = true,
+                    Color = new RgbColor(0, 0, 0),
+                    Thickness = 2.0d,
+                },
+            });
+
+        var outlinedOuterAlphaCount = 0;
+        for (var y = 17; y <= 46; y++)
+        {
+            for (var x = 17; x <= 46; x++)
+            {
+                var insideOriginal = x >= 20 && x <= 43 && y >= 20 && y <= 43;
+                if (insideOriginal)
+                {
+                    continue;
+                }
+
+                Assert.Equal(0, plain.FinalRgba.At<Vec4b>(y, x).Item3);
+                if (outlined.FinalRgba.At<Vec4b>(y, x).Item3 > 0)
+                {
+                    outlinedOuterAlphaCount++;
+                }
+            }
+        }
+
+        Assert.True(outlinedOuterAlphaCount > 0);
+    }
+
+    [Fact]
+    public void FinalizeFromPreResize_DespillOnlyAppliesWithinMaxContourWidth()
+    {
+        using var original = new Mat(1, 5, MatType.CV_8UC3, new Scalar(48, 220, 140));
+        using var trimap = new Mat(1, 5, MatType.CV_8UC1, Scalar.All(255));
+        using var alpha = new Mat(1, 5, MatType.CV_8UC1);
+        alpha.Set(0, 0, 0);
+        alpha.Set(0, 1, 255);
+        alpha.Set(0, 2, 255);
+        alpha.Set(0, 3, 255);
+        alpha.Set(0, 4, 255);
+        using var preResize = new PreResizeCutoutResult(
+            trimap.Clone(),
+            alpha.Clone(),
+            original.Clone(),
+            new RgbColor(0, 255, 0));
+
+        using var processor = CreateProcessor();
+        using var result = processor.FinalizeFromPreResize(
+            preResize,
+            CreateParameters(
+                backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange,
+                backgroundColor: new RgbColor(0, 255, 0),
+                transparencyCut: 0.0d,
+                edgeCorrectionStrength: 0.0d,
+                maxContourWidthPx: 1,
+                edgeColor: null));
+
+        var nearPixel = result.FinalRgba.At<Vec4b>(0, 1);
+        var farPixel = result.FinalRgba.At<Vec4b>(0, 3);
+        var nearAlphaFloat = 230f / 255f;
+        var nearNaiveRestoredG = (220f - ((1f - nearAlphaFloat) * 255f)) / nearAlphaFloat;
+        const float farNaiveRestoredG = 220f;
+
+        Assert.True(nearPixel.Item1 < nearNaiveRestoredG);
+        Assert.Equal(CharacterCutoutProcessorTests.ClampToByteForTest(farNaiveRestoredG), farPixel.Item1);
+    }
+
+    private static byte ClampToByteForTest(float value) => (byte)Math.Clamp((int)Math.Round(value), 0, 255);
 }

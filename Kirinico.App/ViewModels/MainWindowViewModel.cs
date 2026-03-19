@@ -17,20 +17,25 @@ using System.Windows.Threading;
 using WinPoint = System.Windows.Point;
 using MediaColor = System.Windows.Media.Color;
 using SolidColorBrush = System.Windows.Media.SolidColorBrush;
+using Visibility = System.Windows.Visibility;
 
 namespace Kirinico.App.ViewModels;
 
 public sealed class MainWindowViewModel : ObservableObject, IDisposable
 {
     private const string ResultViewerBackgroundHelpText = "ダブルクリックで背景色を変更";
+    private const int PyMattingStartDebounceMs = 500;
+    private readonly string _workerTempDirectory;
 
-    private readonly CharacterCutoutProcessor _processor = new();
+    private readonly CharacterCutoutProcessor _processor;
     private readonly BatchImageProcessor _batchProcessor;
     private readonly object _syncRoot = new();
     private readonly DispatcherTimer _seedBlinkTimer;
+    private readonly InternalSettings _internalSettings = new();
 
     private Mat? _sourceImage;
     private Mat? _backgroundSeedAddMap;
+    private Mat? _latestTrimapMask;
     private PreResizeCutoutResult? _cachedPreResizeResult;
     private CutoutResult? _latestResult;
     private CancellationTokenSource? _renderCts;
@@ -38,9 +43,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _syncingDimensions;
     private bool _isDirty;
     private bool _requiresCoreRender = true;
+    private bool _requiresPresentationRender = true;
     private bool _suspendPreviewInvalidation;
 
     private BitmapSource? _originalImage;
+    private BitmapSource? _trimapImage;
     private BitmapSource? _alphaImage;
     private BitmapSource? _finalImage;
     private BitmapSource? _originalEditOverlayImage;
@@ -58,9 +65,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isBatchBusy;
     private BackgroundSpecificationMode _selectedBackgroundSpecificationMode = BackgroundSpecificationMode.ColorRange;
     private string _backgroundColorHex = "FFFFFF";
-    private double _extraction = 0.7d;
-    private double _noiseRemoval = 0.35d;
-    private double _scanWidth = 5d;
+    private double _backgroundTolerance = 0.5d;
+    private double _noiseRemoval = 0.3d;
+    private double _contourTolerance = 0.4d;
+    private double _maxContourWidth = 0.1d;
+    private MattingMethod _selectedContourInferenceMethod = MattingMethod.Cf;
+    private double _transparencyCut = 0.15d;
+    private double _edgeCorrectionStrength = 0.5d;
     private string _lineColorHex = string.Empty;
     private double _scalePercent = 100d;
     private ResizeInterpolationMode _selectedResizeInterpolation = ResizeInterpolationMode.Lanczos4;
@@ -81,15 +92,30 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private bool _isResultShowingAlpha;
     private ColorPickTarget _activeColorPickTarget = ColorPickTarget.Outline;
     private RgbColor? _eyedropperPreviewColor;
+    private RgbColor? _coordinateStatusColor;
 
     private enum PreviewDirtyKind
     {
-        Core,
+        Trimap,
         Presentation,
+    }
+
+    private enum PreviewRenderMode
+    {
+        TrimapOnly,
+        PresentationOnly,
+        FullPipeline,
     }
 
     public MainWindowViewModel()
     {
+        _workerTempDirectory = Path.Combine(Path.GetTempPath(), "kirinico", "worker");
+        _processor = new CharacterCutoutProcessor(new PythonWorkerAlphaMatteEstimator(new PythonWorkerOptions
+        {
+            WorkerExecutablePath = Path.Combine(AppContext.BaseDirectory, "python_worker", "Kirinico.PyWorker.exe"),
+            WorkingDirectory = AppContext.BaseDirectory,
+            TempDirectory = _workerTempDirectory,
+        }));
         _batchProcessor = new BatchImageProcessor(_processor);
         _seedBlinkTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -119,6 +145,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         new SelectionOption<ResizeInterpolationMode>(ResizeInterpolationMode.Area, "Area"),
     ];
 
+    public IReadOnlyList<SelectionOption<MattingMethod>> ContourInferenceMethodOptions { get; } =
+    [
+        new SelectionOption<MattingMethod>(MattingMethod.Cf, "高速"),
+        new SelectionOption<MattingMethod>(MattingMethod.Knn, "精密"),
+    ];
+
     public ViewportState SharedViewport { get; } = new();
 
     public BitmapSource? OriginalImage
@@ -131,6 +163,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         get => _alphaImage;
         private set => SetProperty(ref _alphaImage, value);
+    }
+
+    public BitmapSource? TrimapImage
+    {
+        get => _trimapImage;
+        private set => SetProperty(ref _trimapImage, value);
     }
 
     public BitmapSource? FinalImage
@@ -208,6 +246,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _coordinateStatusText, value);
     }
 
+    public Brush CoordinateStatusColorBrush => _coordinateStatusColor.HasValue
+        ? CreateSolidBrush(_coordinateStatusColor.Value)
+        : Brushes.Transparent;
+
+    public Visibility CoordinateStatusColorVisibility => _coordinateStatusColor.HasValue
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
     public string StatusText
     {
         get
@@ -273,14 +319,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _isBatchBusy, value);
     }
 
-    public double Extraction
+    public double BackgroundTolerance
     {
-        get => _extraction;
+        get => _backgroundTolerance;
         set
         {
-            if (SetProperty(ref _extraction, value))
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _backgroundTolerance, sanitized))
             {
-                MarkPreviewDirty(PreviewDirtyKind.Core);
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
             }
         }
     }
@@ -299,7 +346,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                 OnPropertyChanged(nameof(IsManualSeedBackgroundMode));
                 OnPropertyChanged(nameof(IsColorRangeBackgroundMode));
-                MarkPreviewDirty(PreviewDirtyKind.Core);
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
             }
         }
     }
@@ -316,7 +363,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _backgroundColorHex, value))
             {
                 OnPropertyChanged(nameof(BackgroundColorPreviewBrush));
-                MarkPreviewDirty(PreviewDirtyKind.Core);
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
             }
         }
     }
@@ -326,22 +373,74 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         get => _noiseRemoval;
         set
         {
-            if (SetProperty(ref _noiseRemoval, value))
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _noiseRemoval, sanitized))
             {
-                MarkPreviewDirty(PreviewDirtyKind.Core);
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
             }
         }
     }
 
-    public double ScanWidth
+    public double ContourTolerance
     {
-        get => _scanWidth;
+        get => _contourTolerance;
         set
         {
-            var sanitized = Math.Clamp(Math.Round(value), 0d, 10d);
-            if (SetProperty(ref _scanWidth, sanitized))
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _contourTolerance, sanitized))
             {
-                MarkPreviewDirty(PreviewDirtyKind.Core);
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
+            }
+        }
+    }
+
+    public double MaxContourWidth
+    {
+        get => _maxContourWidth;
+        set
+        {
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _maxContourWidth, sanitized))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
+            }
+        }
+    }
+
+    public MattingMethod SelectedContourInferenceMethod
+    {
+        get => _selectedContourInferenceMethod;
+        set
+        {
+            if (SetProperty(ref _selectedContourInferenceMethod, value))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
+            }
+        }
+    }
+
+    public double TransparencyCut
+    {
+        get => _transparencyCut;
+        set
+        {
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _transparencyCut, sanitized))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
+            }
+        }
+    }
+
+    public double EdgeCorrectionStrength
+    {
+        get => _edgeCorrectionStrength;
+        set
+        {
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _edgeCorrectionStrength, sanitized))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
@@ -354,7 +453,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _lineColorHex, value))
             {
                 OnPropertyChanged(nameof(LineColorPreviewBrush));
-                MarkPreviewDirty(PreviewDirtyKind.Core);
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
@@ -560,7 +659,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _autoReprocess, value) && value && _isDirty)
             {
-                QueueRender(immediate: true);
+                TryQueueAutoRender(immediate: true);
             }
         }
     }
@@ -662,34 +761,36 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             _sourceImage?.Dispose();
             _sourceImage = loaded.Clone();
+            DisposeLatestTrimapMask();
             DisposeCachedPreResizeResult();
+            ClearLatestResult();
             _requiresCoreRender = true;
+            _requiresPresentationRender = true;
+            _isDirty = true;
 
             _backgroundSeedAddMap?.Dispose();
             _backgroundSeedAddMap = new Mat(_sourceImage.Rows, _sourceImage.Cols, MatType.CV_8UC1, Scalar.All(0d));
-            _backgroundSeedAddMap.Set(0, 0, 255);
         }
 
         CurrentFilePath = path;
         OriginalImage = BitmapSourceFactory.FromBgr(_sourceImage);
         var topLeftPixel = _sourceImage.At<Vec3b>(0, 0);
-        _backgroundColorHex = new RgbColor(topLeftPixel.Item2, topLeftPixel.Item1, topLeftPixel.Item0).ToHex();
-        OnPropertyChanged(nameof(BackgroundColorHex));
-        OnPropertyChanged(nameof(BackgroundColorPreviewBrush));
         SharedViewport.Reset();
-
-        _syncingDimensions = true;
-        _outputWidth = _sourceImage.Width;
-        _outputHeight = _sourceImage.Height;
-        _scalePercent = 100d;
-        _syncingDimensions = false;
-        OnPropertyChanged(nameof(OutputWidth));
-        OnPropertyChanged(nameof(OutputHeight));
-        OnPropertyChanged(nameof(ScalePercent));
+        ResetUiParametersForLoadedImage(new RgbColor(topLeftPixel.Item2, topLeftPixel.Item1, topLeftPixel.Item0).ToHex());
 
         RefreshEditOverlay();
         UpdateModeState(EditorMode.Hand);
-        QueueRender(immediate: true);
+        if (AutoReprocess)
+        {
+            QueueRender(PreviewRenderMode.FullPipeline, immediate: true);
+        }
+        else
+        {
+            TrimapImage = null;
+            PreviewStageText = "再処理待ち";
+            _statusText = GetPendingWorkMessage();
+            OnPropertyChanged(nameof(StatusText));
+        }
     }
 
     public async Task SaveCurrentImageAsync(string path)
@@ -711,19 +812,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public void Reprocess()
     {
-        DisposeCachedPreResizeResult();
-        _requiresCoreRender = true;
-        QueueRender(immediate: true);
+        if (_sourceImage is null)
+        {
+            return;
+        }
+
+        QueueRender(PreviewRenderMode.FullPipeline, immediate: true);
     }
 
     public void CycleFinalBackground()
     {
         FinalBackgroundKind = FinalBackgroundKind switch
         {
-            ViewBackgroundKind.Checker => ViewBackgroundKind.Black,
-            ViewBackgroundKind.Black => ViewBackgroundKind.White,
-            ViewBackgroundKind.White => ViewBackgroundKind.Gray,
-            ViewBackgroundKind.Gray => ViewBackgroundKind.Red,
+            ViewBackgroundKind.Checker => ViewBackgroundKind.White,
+            ViewBackgroundKind.White => ViewBackgroundKind.Black,
+            ViewBackgroundKind.Black => ViewBackgroundKind.Red,
             ViewBackgroundKind.Red => ViewBackgroundKind.Green,
             ViewBackgroundKind.Green => ViewBackgroundKind.Blue,
             _ => ViewBackgroundKind.Checker,
@@ -761,7 +864,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         var snapshot = CreateSettingsSnapshot();
         var json = JsonSerializer.Serialize(snapshot, CreateJsonOptions());
-        await File.WriteAllTextAsync(filePath, json);
+        await File.WriteAllTextAsync(filePath, json, System.Text.Encoding.UTF8);
         _statusText = $"設定を書き出しました: {filePath}";
         OnPropertyChanged(nameof(StatusText));
     }
@@ -773,7 +876,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             throw new FileNotFoundException("設定ファイルが見つかりません。", filePath);
         }
 
-        var json = await File.ReadAllTextAsync(filePath);
+        var json = await File.ReadAllTextAsync(filePath, System.Text.Encoding.UTF8);
         var snapshot = JsonSerializer.Deserialize<AppSettingsSnapshot>(json, CreateJsonOptions())
             ?? throw new InvalidOperationException("設定ファイルを読み込めませんでした。");
 
@@ -810,6 +913,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
         OnPropertyChanged(nameof(IsLineColorEyedropperMode));
         UpdateModeState(EditorMode.Eyedropper);
+    }
+
+    public void CancelEyedropperMode()
+    {
+        if (SelectedEditorMode != EditorMode.Eyedropper)
+        {
+            return;
+        }
+
+        UpdateModeState(EditorMode.Hand);
     }
 
     public IReadOnlyList<SeedPreviewItem> BuildSeedPreviewItems()
@@ -857,7 +970,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         _backgroundSeedAddMap.Set(point.Y, point.X, 0);
         RefreshEditOverlay();
-        MarkPreviewDirty(PreviewDirtyKind.Core);
+        MarkPreviewDirty(PreviewDirtyKind.Trimap);
     }
 
     public void SetHoverHelp(string? message)
@@ -892,8 +1005,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var imageX = Math.Clamp((int)Math.Round(point.X), 0, _sourceImage.Width - 1);
-        var imageY = Math.Clamp((int)Math.Round(point.Y), 0, _sourceImage.Height - 1);
+        var imageX = ToPixelIndex(point.X, _sourceImage.Width);
+        var imageY = ToPixelIndex(point.Y, _sourceImage.Height);
 
         switch (SelectedEditorMode)
         {
@@ -906,7 +1019,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                 ApplySeedPoint(_backgroundSeedAddMap, null, imageX, imageY);
                 RefreshEditOverlay();
-                MarkPreviewDirty(PreviewDirtyKind.Core);
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
                 UpdateModeState(EditorMode.Hand);
                 return;
             case EditorMode.Eyedropper:
@@ -921,51 +1034,79 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         if (_sourceImage is null)
         {
-            CoordinateStatusText = string.Empty;
+            ClearCoordinateStatus();
             ClearEyedropperPreview();
             return;
         }
 
-        var x = Math.Clamp((int)Math.Round(point.X), 0, _sourceImage.Width - 1);
-        var y = Math.Clamp((int)Math.Round(point.Y), 0, _sourceImage.Height - 1);
-        var pixel = _sourceImage.At<Vec3b>(y, x);
-        UpdateEyedropperPreview(new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0));
-        CoordinateStatusText = FormatCoordinateStatus("元画像", x, y, new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0), 100d);
+        var x = ToPixelIndex(point.X, _sourceImage.Width);
+        var y = ToPixelIndex(point.Y, _sourceImage.Height);
+        var color = GetOriginalImageColor(x, y);
+        UpdateEyedropperPreview(color);
+        SetCoordinateStatus(FormatCoordinateStatus("元画像", x, y, color, 100d), color);
     }
 
     public void UpdateAlphaHover(WinPoint point)
     {
-        if (_latestResult is null)
+        var alphaMask = _latestResult?.AlphaMask ?? _cachedPreResizeResult?.AlphaMask;
+        if (alphaMask is null)
         {
-            CoordinateStatusText = string.Empty;
+            ClearCoordinateStatus();
             ClearEyedropperPreview();
             return;
         }
 
-        var alphaMask = _latestResult.AlphaMask;
-        var x = Math.Clamp((int)Math.Round(point.X), 0, alphaMask.Width - 1);
-        var y = Math.Clamp((int)Math.Round(point.Y), 0, alphaMask.Height - 1);
+        var x = ToPixelIndex(point.X, alphaMask.Width);
+        var y = ToPixelIndex(point.Y, alphaMask.Height);
         var value = alphaMask.At<byte>(y, x);
         var grayscale = new RgbColor(value, value, value);
-        CoordinateStatusText = FormatCoordinateStatus("アルファ", x, y, grayscale, value * 100d / 255d);
+        SetCoordinateStatus(FormatCoordinateStatus("アルファ", x, y, grayscale, value * 100d / 255d), grayscale);
+    }
+
+    public void UpdateTrimapHover(WinPoint point)
+    {
+        var trimap = _latestTrimapMask ?? _latestResult?.TrimapMask ?? _cachedPreResizeResult?.TrimapMask;
+        if (trimap is null)
+        {
+            ClearCoordinateStatus();
+            return;
+        }
+
+        var x = ToPixelIndex(point.X, trimap.Width);
+        var y = ToPixelIndex(point.Y, trimap.Height);
+        var value = trimap.At<byte>(y, x);
+        var label = value switch
+        {
+            <= 0 => "背景",
+            >= 255 => "前景",
+            _ => "unknown",
+        };
+        RgbColor? swatchColor = value switch
+        {
+            <= 0 => new RgbColor(0, 0, 0),
+            >= 255 => GetOriginalImageColor(x, y),
+            _ => BlendColors(GetOriginalImageColor(x, y), new RgbColor(255, 0, 0), 0.5d),
+        };
+        SetCoordinateStatus($"trimap ({x}, {y}) {label}", swatchColor);
     }
 
     public void UpdateFinalHover(WinPoint point)
     {
         if (_latestResult is null)
         {
-            CoordinateStatusText = string.Empty;
+            ClearCoordinateStatus();
             SetResultViewerBackgroundHelpActive(false);
             ClearEyedropperPreview();
             return;
         }
 
         var finalRgba = _latestResult.FinalRgba;
-        var x = Math.Clamp((int)Math.Round(point.X), 0, finalRgba.Width - 1);
-        var y = Math.Clamp((int)Math.Round(point.Y), 0, finalRgba.Height - 1);
+        var x = ToPixelIndex(point.X, finalRgba.Width);
+        var y = ToPixelIndex(point.Y, finalRgba.Height);
         var pixel = finalRgba.At<Vec4b>(y, x);
-        UpdateEyedropperPreview(new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0));
-        CoordinateStatusText = FormatCoordinateStatus("結果", x, y, new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0), pixel.Item3 * 100d / 255d);
+        var displayColor = GetDisplayedResultColor(pixel, x, y);
+        UpdateEyedropperPreview(displayColor);
+        SetCoordinateStatus(FormatCoordinateStatus("結果", x, y, displayColor, pixel.Item3 * 100d / 255d), displayColor);
         SetResultViewerBackgroundHelpActive(SelectedEditorMode == EditorMode.Hand && !IsResultShowingAlpha);
     }
 
@@ -984,17 +1125,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            var imageX = Math.Clamp(
-                (int)Math.Round(displayPoint.X / Math.Max(0.0001d, ResultCoordinateScaleX)),
-                0,
-                _sourceImage.Width - 1);
-            var imageY = Math.Clamp(
-                (int)Math.Round(displayPoint.Y / Math.Max(0.0001d, ResultCoordinateScaleY)),
-                0,
-                _sourceImage.Height - 1);
+            var imageX = ToPixelIndex(displayPoint.X / Math.Max(0.0001d, ResultCoordinateScaleX), _sourceImage.Width);
+            var imageY = ToPixelIndex(displayPoint.Y / Math.Max(0.0001d, ResultCoordinateScaleY), _sourceImage.Height);
             ApplySeedPoint(_backgroundSeedAddMap, null, imageX, imageY);
             RefreshEditOverlay();
-            MarkPreviewDirty(PreviewDirtyKind.Core);
+            MarkPreviewDirty(PreviewDirtyKind.Trimap);
             UpdateModeState(EditorMode.Hand);
             return;
         }
@@ -1005,15 +1140,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         var finalRgba = _latestResult.FinalRgba;
-        var x = Math.Clamp((int)Math.Round(displayPoint.X), 0, finalRgba.Width - 1);
-        var y = Math.Clamp((int)Math.Round(displayPoint.Y), 0, finalRgba.Height - 1);
+        var x = ToPixelIndex(displayPoint.X, finalRgba.Width);
+        var y = ToPixelIndex(displayPoint.Y, finalRgba.Height);
         var pixel = finalRgba.At<Vec4b>(y, x);
-        ApplyPickedColor(new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0));
+        ApplyPickedColor(GetDisplayedResultColor(pixel, x, y));
     }
 
     public void ClearCoordinateInfo()
     {
-        CoordinateStatusText = string.Empty;
+        ClearCoordinateStatus();
         SetResultViewerBackgroundHelpActive(false);
         ClearEyedropperPreview();
     }
@@ -1060,12 +1195,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         _renderCts?.Cancel();
         _renderCts?.Dispose();
+        _latestTrimapMask?.Dispose();
         _cachedPreResizeResult?.Dispose();
         _latestResult?.Dispose();
         _sourceImage?.Dispose();
         _backgroundSeedAddMap?.Dispose();
+        _processor.Dispose();
         _seedBlinkTimer.Stop();
         _seedBlinkTimer.Tick -= OnSeedBlinkTimerTick;
+        PythonWorkerTempDirectoryCleaner.TryDelete(_workerTempDirectory);
     }
 
     private void ApplySeedPoint(Mat? targetMap, Mat? oppositeMap, int x, int y)
@@ -1176,7 +1314,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(StatusText));
     }
 
-    private void QueueRender(bool immediate = false)
+    private void QueueRender(PreviewRenderMode mode, bool immediate = false)
     {
         if (_sourceImage is null)
         {
@@ -1184,23 +1322,34 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         _renderCts?.Cancel();
+        _processor.CancelPendingMatting();
         _renderCts?.Dispose();
         _renderCts = new CancellationTokenSource();
         var renderVersion = Interlocked.Increment(ref _renderVersion);
         IsPreviewBusy = true;
         PreviewProgressPercent = 0d;
-        PreviewStageText = immediate ? "再計算を開始" : "再計算待機";
+        PreviewStageText = mode switch
+        {
+            PreviewRenderMode.TrimapOnly => immediate ? "trimap を更新" : "trimap 更新待機",
+            PreviewRenderMode.PresentationOnly => immediate ? "結果を再描画" : "結果再描画待機",
+            _ => immediate ? "PyMatting を実行" : "PyMatting 実行待機",
+        };
         _statusText = "プレビューを更新しています。";
         OnPropertyChanged(nameof(StatusText));
-        _ = RenderPreviewAsync(_renderCts.Token, renderVersion, immediate ? 0 : 120);
+        _ = RenderPreviewAsync(_renderCts.Token, renderVersion, immediate ? 0 : 120, mode);
     }
 
-    private void MarkPreviewDirty(PreviewDirtyKind kind = PreviewDirtyKind.Core)
+    private void MarkPreviewDirty(PreviewDirtyKind kind = PreviewDirtyKind.Trimap)
     {
-        if (kind == PreviewDirtyKind.Core)
+        if (kind == PreviewDirtyKind.Trimap)
         {
             DisposeCachedPreResizeResult();
             _requiresCoreRender = true;
+            _requiresPresentationRender = true;
+        }
+        else
+        {
+            _requiresPresentationRender = true;
         }
 
         if (_suspendPreviewInvalidation)
@@ -1215,21 +1364,69 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
 
         _isDirty = true;
-        if (AutoReprocess)
+        if (AutoReprocess && TryQueueAutoRender(immediate: false))
         {
-            QueueRender(false);
             return;
         }
 
         _renderCts?.Cancel();
+        _processor.CancelPendingMatting();
         _renderCts?.Dispose();
         _renderCts = null;
         Interlocked.Increment(ref _renderVersion);
         IsPreviewBusy = false;
         PreviewProgressPercent = 0d;
         PreviewStageText = "再処理待ち";
-        _statusText = "設定を変更しました。再処理を押してください。";
+        _statusText = GetPendingWorkMessage();
         OnPropertyChanged(nameof(StatusText));
+    }
+
+    private bool TryQueueAutoRender(bool immediate)
+    {
+        if (_sourceImage is null)
+        {
+            return false;
+        }
+
+        if (_requiresCoreRender)
+        {
+            QueueRender(PreviewRenderMode.FullPipeline, immediate);
+            return true;
+        }
+
+        if (_requiresPresentationRender)
+        {
+            QueueRender(_cachedPreResizeResult is not null ? PreviewRenderMode.PresentationOnly : PreviewRenderMode.FullPipeline, immediate);
+            return true;
+        }
+
+        return false;
+    }
+
+    private string GetPendingWorkMessage()
+    {
+        if (_requiresCoreRender || _requiresPresentationRender)
+        {
+            return "変更があります。再処理を押してください。";
+        }
+
+        return "設定を変更しました。再処理を押してください。";
+    }
+
+    private void ClearLatestResult()
+    {
+        _latestResult?.Dispose();
+        _latestResult = null;
+        FinalImage = null;
+        OnPropertyChanged(nameof(DisplayedResultImage));
+        ResultCoordinateScaleX = 1d;
+        ResultCoordinateScaleY = 1d;
+    }
+
+    private void DisposeLatestTrimapMask()
+    {
+        _latestTrimapMask?.Dispose();
+        _latestTrimapMask = null;
     }
 
     private void DisposeCachedPreResizeResult()
@@ -1238,45 +1435,107 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _cachedPreResizeResult = null;
     }
 
+    private void SetLatestTrimapMask(Mat trimapMask)
+    {
+        DisposeLatestTrimapMask();
+        _latestTrimapMask = trimapMask;
+    }
+
     private AppSettingsSnapshot CreateSettingsSnapshot() => new()
     {
-        BackgroundSpecificationMode = SelectedBackgroundSpecificationMode,
-        BackgroundColorHex = BackgroundColorHex,
-        Extraction = Extraction,
-        NoiseRemoval = NoiseRemoval,
-        ScanWidth = ScanWidth,
-        LineColorHex = LineColorHex,
-        ScalePercent = ScalePercent,
-        ResizeInterpolation = SelectedResizeInterpolation,
-        OutputWidth = OutputWidth,
-        OutputHeight = OutputHeight,
-        OutlineEnabled = OutlineEnabled,
-        OutlineColorHex = OutlineColorHex,
-        OutlineThickness = OutlineThickness,
-        AutoReprocess = AutoReprocess,
-        BackgroundSeeds = CollectSeedSnapshots(),
+        Ui = new AppSettingsSnapshot.UiSettingsSnapshot
+        {
+            BackgroundSpecificationMode = SelectedBackgroundSpecificationMode,
+            BackgroundColorHex = BackgroundColorHex,
+            BackgroundTolerance = BackgroundTolerance,
+            ContourTolerance = ContourTolerance,
+            MaxContourWidth = MaxContourWidth,
+            DenoiseStrength = NoiseRemoval,
+            ContourInferenceMethod = SelectedContourInferenceMethod,
+            BackgroundSeeds = CollectSeedSnapshots(),
+            TransparencyCut = TransparencyCut,
+            EdgeCorrectionStrength = EdgeCorrectionStrength,
+            EdgeRepresentativeColorHex = string.IsNullOrWhiteSpace(LineColorHex) ? null : LineColorHex,
+            AutoReprocess = AutoReprocess,
+            ResizeInterpolation = SelectedResizeInterpolation,
+            ScalePercent = ScalePercent,
+            OutputWidth = OutputWidth,
+            OutputHeight = OutputHeight,
+            OutlineEnabled = OutlineEnabled,
+            OutlineColorHex = OutlineColorHex,
+            OutlineThickness = OutlineThickness,
+        },
+        Internal = _internalSettings,
     };
 
-    private void ApplySettingsSnapshot(AppSettingsSnapshot snapshot)
+    private void ResetUiParametersForLoadedImage(string backgroundColorHex)
     {
+        var defaults = new AppSettingsSnapshot.UiSettingsSnapshot();
         _suspendPreviewInvalidation = true;
         try
         {
-            SelectedBackgroundSpecificationMode = snapshot.BackgroundSpecificationMode;
-            BackgroundColorHex = snapshot.BackgroundColorHex;
-            Extraction = snapshot.Extraction;
-            NoiseRemoval = snapshot.NoiseRemoval;
-            ScanWidth = snapshot.ScanWidth;
-            LineColorHex = snapshot.LineColorHex;
-            ScalePercent = snapshot.ScalePercent;
-            SelectedResizeInterpolation = snapshot.ResizeInterpolation;
-            OutputWidth = Math.Max(1, snapshot.OutputWidth);
-            OutputHeight = Math.Max(1, snapshot.OutputHeight);
-            OutlineEnabled = snapshot.OutlineEnabled;
-            OutlineColorHex = snapshot.OutlineColorHex;
-            OutlineThickness = snapshot.OutlineThickness;
-            AutoReprocess = snapshot.AutoReprocess;
-            RestoreSeedSnapshots(snapshot.BackgroundSeeds);
+            SelectedBackgroundSpecificationMode = defaults.BackgroundSpecificationMode;
+            BackgroundColorHex = backgroundColorHex;
+            BackgroundTolerance = defaults.BackgroundTolerance;
+            NoiseRemoval = defaults.DenoiseStrength;
+            ContourTolerance = defaults.ContourTolerance;
+            MaxContourWidth = defaults.MaxContourWidth;
+            SelectedContourInferenceMethod = defaults.ContourInferenceMethod;
+            TransparencyCut = defaults.TransparencyCut;
+            EdgeCorrectionStrength = defaults.EdgeCorrectionStrength;
+            LineColorHex = defaults.EdgeRepresentativeColorHex ?? string.Empty;
+            AutoReprocess = defaults.AutoReprocess;
+            SelectedResizeInterpolation = defaults.ResizeInterpolation;
+            OutlineEnabled = defaults.OutlineEnabled;
+            OutlineColorHex = defaults.OutlineColorHex;
+            OutlineThickness = defaults.OutlineThickness;
+            FinalBackgroundKind = ViewBackgroundKind.Checker;
+            IsResultShowingAlpha = false;
+
+            _syncingDimensions = true;
+            _outputWidth = Math.Max(1, _sourceImage?.Width ?? defaults.OutputWidth);
+            _outputHeight = Math.Max(1, _sourceImage?.Height ?? defaults.OutputHeight);
+            _scalePercent = defaults.ScalePercent;
+            _syncingDimensions = false;
+            OnPropertyChanged(nameof(OutputWidth));
+            OnPropertyChanged(nameof(OutputHeight));
+            OnPropertyChanged(nameof(ScalePercent));
+        }
+        finally
+        {
+            _suspendPreviewInvalidation = false;
+        }
+    }
+
+    private void ApplySettingsSnapshot(AppSettingsSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+
+        _suspendPreviewInvalidation = true;
+        try
+        {
+            var ui = snapshot.Ui ?? new AppSettingsSnapshot.UiSettingsSnapshot();
+
+            SelectedBackgroundSpecificationMode = ui.BackgroundSpecificationMode;
+            BackgroundColorHex = ui.BackgroundColorHex;
+            BackgroundTolerance = ui.BackgroundTolerance;
+            NoiseRemoval = ui.DenoiseStrength;
+            ContourTolerance = ui.ContourTolerance;
+            MaxContourWidth = ui.MaxContourWidth;
+            SelectedContourInferenceMethod = ui.ContourInferenceMethod;
+            TransparencyCut = ui.TransparencyCut;
+            EdgeCorrectionStrength = ui.EdgeCorrectionStrength;
+            LineColorHex = ui.EdgeRepresentativeColorHex ?? string.Empty;
+            ScalePercent = ui.ScalePercent;
+            SelectedResizeInterpolation = ui.ResizeInterpolation;
+            OutputWidth = Math.Max(1, ui.OutputWidth);
+            OutputHeight = Math.Max(1, ui.OutputHeight);
+            OutlineEnabled = ui.OutlineEnabled;
+            OutlineColorHex = ui.OutlineColorHex;
+            OutlineThickness = ui.OutlineThickness;
+            AutoReprocess = ui.AutoReprocess;
+            RestoreSeedSnapshots(ui.BackgroundSeeds);
+            CopyInternalSettings(snapshot.Internal);
         }
         finally
         {
@@ -1288,20 +1547,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (AutoReprocess)
+        if (AutoReprocess && TryQueueAutoRender(immediate: true))
         {
-            QueueRender(immediate: true);
             return;
         }
 
         _isDirty = true;
         _renderCts?.Cancel();
+        _processor.CancelPendingMatting();
         _renderCts?.Dispose();
         _renderCts = null;
         Interlocked.Increment(ref _renderVersion);
         IsPreviewBusy = false;
         PreviewProgressPercent = 0d;
         PreviewStageText = "再処理待ち";
+        _statusText = GetPendingWorkMessage();
         OnPropertyChanged(nameof(StatusText));
     }
 
@@ -1313,6 +1573,59 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             new JsonStringEnumConverter(),
         },
     };
+
+    private void CopyInternalSettings(InternalSettings? source)
+    {
+        if (source is null)
+        {
+            return;
+        }
+
+        _internalSettings.Matting.Method = source.Matting.Method;
+        _internalSettings.Matting.Cf.MaxIters = source.Matting.Cf.MaxIters;
+        _internalSettings.Matting.Cf.Tolerance = source.Matting.Cf.Tolerance;
+        _internalSettings.Matting.Cf.Preconditioner = source.Matting.Cf.Preconditioner;
+        _internalSettings.Matting.Cf.DiscardThreshold = source.Matting.Cf.DiscardThreshold;
+        _internalSettings.Matting.Cf.Shift = source.Matting.Cf.Shift;
+        _internalSettings.Matting.Cf.Epsilon = source.Matting.Cf.Epsilon;
+        _internalSettings.Matting.Cf.Radius = source.Matting.Cf.Radius;
+        _internalSettings.Matting.Knn.MaxIters = source.Matting.Knn.MaxIters;
+        _internalSettings.Matting.Knn.Tolerance = source.Matting.Knn.Tolerance;
+        _internalSettings.Matting.Knn.Preconditioner = source.Matting.Knn.Preconditioner;
+        _internalSettings.Matting.Knn.DiscardThreshold = source.Matting.Knn.DiscardThreshold;
+        _internalSettings.Matting.Knn.Shift = source.Matting.Knn.Shift;
+        _internalSettings.Matting.Knn.Neighbors1 = source.Matting.Knn.Neighbors1;
+        _internalSettings.Matting.Knn.Neighbors2 = source.Matting.Knn.Neighbors2;
+        _internalSettings.Matting.Knn.DistanceWeight1 = source.Matting.Knn.DistanceWeight1;
+        _internalSettings.Matting.Knn.DistanceWeight2 = source.Matting.Knn.DistanceWeight2;
+        _internalSettings.Matting.Knn.Kernel = source.Matting.Knn.Kernel;
+        _internalSettings.Matting.Lkm.MaxIters = source.Matting.Lkm.MaxIters;
+        _internalSettings.Matting.Lkm.Tolerance = source.Matting.Lkm.Tolerance;
+        _internalSettings.Matting.Lkm.Epsilon = source.Matting.Lkm.Epsilon;
+        _internalSettings.Matting.Lkm.Radius = source.Matting.Lkm.Radius;
+
+        _internalSettings.BackgroundThreshold.TbgMin = source.BackgroundThreshold.TbgMin;
+        _internalSettings.BackgroundThreshold.TbgMax = source.BackgroundThreshold.TbgMax;
+        _internalSettings.BackgroundThreshold.TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin;
+        _internalSettings.BackgroundThreshold.TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax;
+        _internalSettings.BackgroundThreshold.BgNoiseMinArea = source.BackgroundThreshold.BgNoiseMinArea;
+        _internalSettings.BackgroundThreshold.BgNoiseMaxHoleArea = source.BackgroundThreshold.BgNoiseMaxHoleArea;
+
+        _internalSettings.Preprocess.DenoiseRadiusMin = source.Preprocess.DenoiseRadiusMin;
+        _internalSettings.Preprocess.DenoiseRadiusMax = source.Preprocess.DenoiseRadiusMax;
+        _internalSettings.Preprocess.DenoiseSigmaMin = source.Preprocess.DenoiseSigmaMin;
+        _internalSettings.Preprocess.DenoiseSigmaMax = source.Preprocess.DenoiseSigmaMax;
+
+        _internalSettings.AlphaColorRestore.AlphaCutMin = source.AlphaColorRestore.AlphaCutMin;
+        _internalSettings.AlphaColorRestore.AlphaCutMax = source.AlphaColorRestore.AlphaCutMax;
+        _internalSettings.AlphaColorRestore.MidAlphaUpperMin = source.AlphaColorRestore.MidAlphaUpperMin;
+        _internalSettings.AlphaColorRestore.MidAlphaUpperMax = source.AlphaColorRestore.MidAlphaUpperMax;
+        _internalSettings.AlphaColorRestore.EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin;
+        _internalSettings.AlphaColorRestore.EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax;
+        _internalSettings.AlphaColorRestore.DespillStrength = source.AlphaColorRestore.DespillStrength;
+        _internalSettings.AlphaColorRestore.RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon;
+        _internalSettings.AlphaColorRestore.UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided;
+    }
 
     private List<AppSettingsSnapshot.SeedPointSnapshot> CollectSeedSnapshots()
     {
@@ -1367,7 +1680,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         RefreshEditOverlay();
     }
 
-    private async Task RenderPreviewAsync(CancellationToken cancellationToken, int renderVersion, int delayMs)
+    private async Task RenderPreviewAsync(CancellationToken cancellationToken, int renderVersion, int delayMs, PreviewRenderMode mode)
     {
         try
         {
@@ -1385,14 +1698,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ManualEditMaps? manualMaps = null;
             PreResizeCutoutResult? preResizeCacheClone = null;
             CutoutParameters parameters;
-            var needsCoreRender = true;
 
             lock (_syncRoot)
             {
                 parameters = BuildParameters();
-                needsCoreRender = _requiresCoreRender || _cachedPreResizeResult is null;
 
-                if (needsCoreRender)
+                if (mode is PreviewRenderMode.TrimapOnly or PreviewRenderMode.FullPipeline)
                 {
                     sourceClone = _sourceImage?.Clone() ?? throw new InvalidOperationException("元画像が読み込まれていません。");
                     if (_backgroundSeedAddMap is not null)
@@ -1403,13 +1714,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         };
                     }
                 }
-                else
+                else if (_cachedPreResizeResult is not null)
                 {
-                    preResizeCacheClone = _cachedPreResizeResult!.Clone();
+                    preResizeCacheClone = _cachedPreResizeResult.Clone();
                 }
             }
 
-            if (needsCoreRender
+            if (mode is PreviewRenderMode.TrimapOnly or PreviewRenderMode.FullPipeline
                 && parameters.BackgroundSpecificationMode == BackgroundSpecificationMode.ManualSeed
                 && !HasAnyBackgroundSeed(manualMaps))
             {
@@ -1422,18 +1733,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         return;
                     }
 
-                    _latestResult?.Dispose();
-                    _latestResult = null;
+                    ClearLatestResult();
+                    DisposeLatestTrimapMask();
                     DisposeCachedPreResizeResult();
                     _requiresCoreRender = true;
-                    AlphaImage = null;
-                    FinalImage = null;
-                    OnPropertyChanged(nameof(DisplayedResultImage));
-                    ResultCoordinateScaleX = 1d;
-                    ResultCoordinateScaleY = 1d;
+                    _requiresPresentationRender = true;
+                    TrimapImage = null;
                     IsPreviewBusy = false;
                     PreviewProgressPercent = 0d;
                     PreviewStageText = "seedなし";
+                    _isDirty = true;
                     _statusText = "背景seedがありません。追加ワンドでseedを置いてください。";
                     OnPropertyChanged(nameof(StatusText));
                 });
@@ -1454,33 +1763,103 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(StatusText));
             });
 
-            if (!needsCoreRender)
-            {
-                await Application.Current.Dispatcher.InvokeAsync(() =>
-                {
-                    if (renderVersion != Volatile.Read(ref _renderVersion))
-                    {
-                        return;
-                    }
-
-                    IsPreviewBusy = true;
-                    PreviewProgressPercent = 96d;
-                    PreviewStageText = "リサイズと縁取りを適用";
-                    _statusText = "プレビュー更新中: リサイズと縁取りを適用";
-                    OnPropertyChanged(nameof(StatusText));
-                });
-            }
-
             PreResizeCutoutResult? refreshedPreResize = null;
 
             using (sourceClone)
             using (manualMaps)
             using (preResizeCacheClone)
             {
-                CutoutResult result;
-                if (needsCoreRender)
+                if (mode == PreviewRenderMode.TrimapOnly)
                 {
-                    refreshedPreResize = await Task.Run(() => _processor.ProcessPreResize(sourceClone!, parameters, manualMaps, progress), cancellationToken);
+                    using var preparedTrimap = await Task.Run(() => _processor.PrepareTrimap(sourceClone!, parameters, manualMaps, progress), cancellationToken);
+                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    {
+                        return;
+                    }
+
+                    var trimapPreviewBitmap = BitmapSourceFactory.FromTrimapPreview(preparedTrimap.OriginalBgr, preparedTrimap.TrimapMask);
+                    var trimapCache = preparedTrimap.TrimapMask.Clone();
+
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        {
+                            trimapCache.Dispose();
+                            return;
+                        }
+
+                        SetLatestTrimapMask(trimapCache);
+                        DisposeCachedPreResizeResult();
+                        ClearLatestResult();
+                        TrimapImage = trimapPreviewBitmap;
+                        _requiresCoreRender = false;
+                        _requiresPresentationRender = true;
+                        _isDirty = true;
+                        IsPreviewBusy = false;
+                        PreviewProgressPercent = 0d;
+                        PreviewStageText = "再処理待ち";
+                        _statusText = "trimap を更新しました。PyMatting を実行してください。";
+                        OnPropertyChanged(nameof(StatusText));
+                    });
+
+                    return;
+                }
+
+                CutoutResult result;
+                if (mode == PreviewRenderMode.FullPipeline)
+                {
+                    using var preparedTrimap = await Task.Run(() => _processor.PrepareTrimap(sourceClone!, parameters, manualMaps, progress), cancellationToken);
+                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    {
+                        return;
+                    }
+
+                    var interimTrimapBitmap = BitmapSourceFactory.FromTrimapPreview(preparedTrimap.OriginalBgr, preparedTrimap.TrimapMask);
+                    var interimTrimapCache = preparedTrimap.TrimapMask.Clone();
+
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        {
+                            interimTrimapCache.Dispose();
+                            return;
+                        }
+
+                        SetLatestTrimapMask(interimTrimapCache);
+                        TrimapImage = interimTrimapBitmap;
+                    });
+
+                    if (cancellationToken.IsCancellationRequested || renderVersion != Volatile.Read(ref _renderVersion))
+                    {
+                        return;
+                    }
+
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        {
+                            return;
+                        }
+
+                        IsPreviewBusy = true;
+                        PreviewProgressPercent = 30d;
+                        PreviewStageText = "PyMatting 開始待ち";
+                        _statusText = "プレビュー更新中: PyMatting 開始待ち";
+                        OnPropertyChanged(nameof(StatusText));
+                    });
+
+                    await Task.Delay(PyMattingStartDebounceMs, cancellationToken);
+                    if (cancellationToken.IsCancellationRequested || renderVersion != Volatile.Read(ref _renderVersion))
+                    {
+                        return;
+                    }
+
+                    refreshedPreResize = await Task.Run(() => _processor.EstimateAlphaFromTrimap(preparedTrimap, parameters, progress), cancellationToken);
+                    if (refreshedPreResize is null)
+                    {
+                        return;
+                    }
+
                     if (renderVersion != Volatile.Read(ref _renderVersion))
                     {
                         refreshedPreResize.Dispose();
@@ -1491,7 +1870,26 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 }
                 else
                 {
-                    result = await Task.Run(() => _processor.FinalizeFromPreResize(preResizeCacheClone!, parameters, progress), cancellationToken);
+                    if (preResizeCacheClone is null)
+                    {
+                        throw new InvalidOperationException("PyMatting の実行結果がありません。");
+                    }
+
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        {
+                            return;
+                        }
+
+                        IsPreviewBusy = true;
+                        PreviewProgressPercent = 95d;
+                        PreviewStageText = "リサイズと縁取りを適用";
+                        _statusText = "プレビュー更新中: リサイズと縁取りを適用";
+                        OnPropertyChanged(nameof(StatusText));
+                    });
+
+                    result = await Task.Run(() => _processor.FinalizeFromPreResize(preResizeCacheClone, parameters, progress), cancellationToken);
                 }
 
                 if (renderVersion != Volatile.Read(ref _renderVersion))
@@ -1505,6 +1903,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 var finalBitmap = BitmapSourceFactory.FromBgra(result.FinalRgba);
                 var resultScaleX = _sourceImage is null ? 1d : result.FinalRgba.Width / (double)_sourceImage.Width;
                 var resultScaleY = _sourceImage is null ? 1d : result.FinalRgba.Height / (double)_sourceImage.Height;
+                BitmapSource? trimapBitmap = null;
+                if (mode == PreviewRenderMode.PresentationOnly)
+                {
+                    trimapBitmap = BitmapSourceFactory.FromTrimapPreview(preResizeCacheClone?.OriginalBgr ?? _sourceImage!, result.TrimapMask);
+                }
 
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
@@ -1514,20 +1917,27 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         return;
                     }
 
-                    _latestResult?.Dispose();
-                    _latestResult = result;
+                    if (mode == PreviewRenderMode.PresentationOnly)
+                    {
+                        SetLatestTrimapMask(result.TrimapMask.Clone());
+                        TrimapImage = trimapBitmap;
+                    }
+
                     if (refreshedPreResize is not null)
                     {
                         DisposeCachedPreResizeResult();
                         _cachedPreResizeResult = refreshedPreResize;
-                        _requiresCoreRender = false;
                         refreshedPreResize = null;
                     }
+                    ClearLatestResult();
+                    _latestResult = result;
                     AlphaImage = alphaBitmap;
                     FinalImage = finalBitmap;
                     OnPropertyChanged(nameof(DisplayedResultImage));
                     ResultCoordinateScaleX = resultScaleX;
                     ResultCoordinateScaleY = resultScaleY;
+                    _requiresCoreRender = false;
+                    _requiresPresentationRender = false;
                     IsPreviewBusy = false;
                     _isDirty = false;
                     PreviewProgressPercent = 0d;
@@ -1549,9 +1959,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 IsPreviewBusy = false;
                 PreviewProgressPercent = 0d;
                 PreviewStageText = "待機";
-                    _statusText = _isDirty ? "設定を変更しました。再処理を押してください。" : GetCurrentModeMessage();
-                    OnPropertyChanged(nameof(StatusText));
-                });
+                _statusText = _isDirty ? GetPendingWorkMessage() : GetCurrentModeMessage();
+                OnPropertyChanged(nameof(StatusText));
+            });
         }
         catch (Exception exception)
         {
@@ -1576,6 +1986,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var outlineColor = RgbColor.TryParseHex(OutlineColorHex, out var parsedOutline)
             ? parsedOutline
             : new RgbColor(0, 0, 0);
+        var internalSettings = CloneInternalSettings(_internalSettings);
+        internalSettings.Matting.Method = SelectedContourInferenceMethod;
 
         return new CutoutParameters
         {
@@ -1583,10 +1995,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             BackgroundColor = RgbColor.TryParseHex(BackgroundColorHex, out var parsedBackground)
                 ? parsedBackground
                 : new RgbColor(255, 255, 255),
-            Extraction = Extraction,
-            NoiseRemoval = NoiseRemoval,
-            ScanWidth = (int)Math.Round(ScanWidth),
-            LineColor = RgbColor.TryParseHex(LineColorHex, out var parsedLineColor)
+            BackgroundTolerance = BackgroundTolerance,
+            DenoiseStrength = NoiseRemoval,
+            ContourTolerance = ContourTolerance,
+            MaxContourWidthPx = (int)Math.Round(MaxContourWidth * 128d),
+            TransparencyCut = TransparencyCut,
+            EdgeCorrectionStrength = EdgeCorrectionStrength,
+            EdgeRepresentativeColor = RgbColor.TryParseHex(LineColorHex, out var parsedLineColor)
                 ? parsedLineColor
                 : null,
             Resize = new ResizeOptions
@@ -1602,6 +2017,76 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 Enabled = OutlineEnabled,
                 Color = outlineColor,
                 Thickness = OutlineThickness,
+            },
+            Internal = internalSettings,
+        };
+    }
+
+    private static InternalSettings CloneInternalSettings(InternalSettings source)
+    {
+        return new InternalSettings
+        {
+            Matting = new MattingSettings
+            {
+                Method = source.Matting.Method,
+                Cf = new CfMattingSettings
+                {
+                    MaxIters = source.Matting.Cf.MaxIters,
+                    Tolerance = source.Matting.Cf.Tolerance,
+                    Preconditioner = source.Matting.Cf.Preconditioner,
+                    DiscardThreshold = source.Matting.Cf.DiscardThreshold,
+                    Shift = source.Matting.Cf.Shift,
+                    Epsilon = source.Matting.Cf.Epsilon,
+                    Radius = source.Matting.Cf.Radius,
+                },
+                Knn = new KnnMattingSettings
+                {
+                    MaxIters = source.Matting.Knn.MaxIters,
+                    Tolerance = source.Matting.Knn.Tolerance,
+                    Preconditioner = source.Matting.Knn.Preconditioner,
+                    DiscardThreshold = source.Matting.Knn.DiscardThreshold,
+                    Shift = source.Matting.Knn.Shift,
+                    Neighbors1 = source.Matting.Knn.Neighbors1,
+                    Neighbors2 = source.Matting.Knn.Neighbors2,
+                    DistanceWeight1 = source.Matting.Knn.DistanceWeight1,
+                    DistanceWeight2 = source.Matting.Knn.DistanceWeight2,
+                    Kernel = source.Matting.Knn.Kernel,
+                },
+                Lkm = new LkmMattingSettings
+                {
+                    MaxIters = source.Matting.Lkm.MaxIters,
+                    Tolerance = source.Matting.Lkm.Tolerance,
+                    Epsilon = source.Matting.Lkm.Epsilon,
+                    Radius = source.Matting.Lkm.Radius,
+                },
+            },
+            BackgroundThreshold = new BackgroundThresholdSettings
+            {
+                TbgMin = source.BackgroundThreshold.TbgMin,
+                TbgMax = source.BackgroundThreshold.TbgMax,
+                TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin,
+                TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax,
+                BgNoiseMinArea = source.BackgroundThreshold.BgNoiseMinArea,
+                BgNoiseMaxHoleArea = source.BackgroundThreshold.BgNoiseMaxHoleArea,
+            },
+            Preprocess = new PreprocessSettings
+            {
+                DenoiseRadiusMin = source.Preprocess.DenoiseRadiusMin,
+                DenoiseRadiusMax = source.Preprocess.DenoiseRadiusMax,
+                DenoiseSigmaMin = source.Preprocess.DenoiseSigmaMin,
+                DenoiseSigmaMax = source.Preprocess.DenoiseSigmaMax,
+            },
+            AlphaColorRestore = new AlphaColorRestoreSettings
+            {
+                AlphaCutMin = source.AlphaColorRestore.AlphaCutMin,
+                AlphaCutMax = source.AlphaColorRestore.AlphaCutMax,
+                MidAlphaUpperMin = source.AlphaColorRestore.MidAlphaUpperMin,
+                MidAlphaUpperMax = source.AlphaColorRestore.MidAlphaUpperMax,
+                EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin,
+                EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax,
+                DespillStrength = source.AlphaColorRestore.DespillStrength,
+                RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon,
+                UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided,
             },
         };
     }
@@ -1642,6 +2127,34 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             && Cv2.CountNonZero(manualMaps.BackgroundSeedAddMap) > 0;
     }
 
+    private RgbColor GetDisplayedResultColor(Vec4b pixel, int x, int y)
+    {
+        var alpha = pixel.Item3 / 255d;
+        var background = GetBackgroundSample(FinalBackgroundKind, x, y);
+        return new RgbColor(
+            BlendDisplayedChannel(pixel.Item2, background.R, alpha),
+            BlendDisplayedChannel(pixel.Item1, background.G, alpha),
+            BlendDisplayedChannel(pixel.Item0, background.B, alpha));
+    }
+
+    private static RgbColor GetBackgroundSample(ViewBackgroundKind kind, int x, int y)
+    {
+        return kind switch
+        {
+            ViewBackgroundKind.White => new RgbColor(255, 255, 255),
+            ViewBackgroundKind.Black => new RgbColor(0, 0, 0),
+            ViewBackgroundKind.Red => new RgbColor(255, 0, 0),
+            ViewBackgroundKind.Green => new RgbColor(0, 255, 0),
+            ViewBackgroundKind.Blue => new RgbColor(0, 0, 255),
+            _ => (((x / 12) + (y / 12)) & 1) == 0
+                ? new RgbColor(210, 210, 210)
+                : new RgbColor(164, 164, 164),
+        };
+    }
+
+    private static byte BlendDisplayedChannel(byte foreground, byte background, double alpha)
+        => (byte)Math.Clamp((int)Math.Round((foreground * alpha) + (background * (1d - alpha))), 0, 255);
+
     private static Vec4b CreateSeedOverlayColor(int hue)
     {
         var normalizedHue = ((hue % 360) + 360) % 360;
@@ -1680,6 +2193,34 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private static string FormatCoordinateStatus(string label, int x, int y, RgbColor color, double alphaPercent)
         => $"{label} ({x},{y}) {color.ToHex()} {alphaPercent:0}%";
+
+    private static int ToPixelIndex(double coordinate, int size)
+    {
+        if (size <= 1)
+        {
+            return 0;
+        }
+
+        return Math.Clamp((int)Math.Floor(coordinate), 0, size - 1);
+    }
+
+    private void SetCoordinateStatus(string text, RgbColor? color = null)
+    {
+        CoordinateStatusText = text;
+        if (_coordinateStatusColor == color)
+        {
+            return;
+        }
+
+        _coordinateStatusColor = color;
+        OnPropertyChanged(nameof(CoordinateStatusColorBrush));
+        OnPropertyChanged(nameof(CoordinateStatusColorVisibility));
+    }
+
+    private void ClearCoordinateStatus()
+    {
+        SetCoordinateStatus(string.Empty);
+    }
 
     private void UpdateEyedropperPreview(RgbColor color)
     {
@@ -1730,6 +2271,28 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var brush = new SolidColorBrush(MediaColor.FromRgb(color.R, color.G, color.B));
         brush.Freeze();
         return brush;
+    }
+
+    private RgbColor GetOriginalImageColor(int x, int y)
+    {
+        if (_sourceImage is null)
+        {
+            return new RgbColor(0, 0, 0);
+        }
+
+        var clampedX = Math.Clamp(x, 0, _sourceImage.Width - 1);
+        var clampedY = Math.Clamp(y, 0, _sourceImage.Height - 1);
+        var pixel = _sourceImage.At<Vec3b>(clampedY, clampedX);
+        return new RgbColor(pixel.Item2, pixel.Item1, pixel.Item0);
+    }
+
+    private static RgbColor BlendColors(RgbColor baseColor, RgbColor overlayColor, double overlayOpacity)
+    {
+        var t = Math.Clamp(overlayOpacity, 0d, 1d);
+        return new RgbColor(
+            (byte)Math.Clamp((int)Math.Round((baseColor.R * (1d - t)) + (overlayColor.R * t)), 0, 255),
+            (byte)Math.Clamp((int)Math.Round((baseColor.G * (1d - t)) + (overlayColor.G * t)), 0, 255),
+            (byte)Math.Clamp((int)Math.Round((baseColor.B * (1d - t)) + (overlayColor.B * t)), 0, 255));
     }
 
     private static double ConvertSliderPositionToOutlineThickness(double position)

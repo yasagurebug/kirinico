@@ -16,9 +16,8 @@ public static class ViewerBrushes
 {
     private static readonly Brush CheckerBrush = CreateCheckerBrush();
     private static readonly Brush AlphaFixedBrush = CreateFrozenBrush(Color.FromRgb(0, 0, 0));
-    private static readonly Brush BlackBrush = CreateFrozenBrush(Color.FromRgb(16, 16, 16));
-    private static readonly Brush WhiteBrush = CreateFrozenBrush(Color.FromRgb(250, 250, 250));
-    private static readonly Brush GrayBrush = CreateFrozenBrush(Color.FromRgb(128, 128, 128));
+    private static readonly Brush BlackBrush = CreateFrozenBrush(Color.FromRgb(0, 0, 0));
+    private static readonly Brush WhiteBrush = CreateFrozenBrush(Color.FromRgb(255, 255, 255));
     private static readonly Brush RedBrush = CreateFrozenBrush(Color.FromRgb(255, 0, 0));
     private static readonly Brush GreenBrush = CreateFrozenBrush(Color.FromRgb(0, 255, 0));
     private static readonly Brush BlueBrush = CreateFrozenBrush(Color.FromRgb(0, 0, 255));
@@ -32,7 +31,6 @@ public static class ViewerBrushes
     {
         ViewBackgroundKind.Black => BlackBrush,
         ViewBackgroundKind.White => WhiteBrush,
-        ViewBackgroundKind.Gray => GrayBrush,
         ViewBackgroundKind.Red => RedBrush,
         ViewBackgroundKind.Green => GreenBrush,
         ViewBackgroundKind.Blue => BlueBrush,

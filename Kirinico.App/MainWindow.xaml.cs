@@ -273,6 +273,12 @@ public partial class MainWindow : Window
 
     private void AlphaViewer_OnPointerReleased(object sender, ImagePointerEventArgs e) => _viewModel.EndEditableInteraction();
 
+    private void TrimapViewer_OnPointerPressed(object sender, ImagePointerEventArgs e) => _viewModel.UpdateTrimapHover(e.SourcePoint);
+
+    private void TrimapViewer_OnPointerMoved(object sender, ImagePointerEventArgs e) => _viewModel.UpdateTrimapHover(e.SourcePoint);
+
+    private void TrimapViewer_OnPointerReleased(object sender, ImagePointerEventArgs e) => _viewModel.ClearCoordinateInfo();
+
     private void ResultViewer_OnTitleClicked(object sender, EventArgs e) => _viewModel.ToggleResultViewerMode();
 
     private void FinalViewer_OnPointerPressed(object sender, ImagePointerEventArgs e)
@@ -358,6 +364,21 @@ public partial class MainWindow : Window
         }
     }
 
+    private void Window_OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!_viewModel.IsEyedropperMode)
+        {
+            return;
+        }
+
+        if (IsPointerInsideViewer(e.OriginalSource as DependencyObject))
+        {
+            return;
+        }
+
+        _viewModel.CancelEyedropperMode();
+    }
+
     private void Window_OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if ((Keyboard.Modifiers & ModifierKeys.Control) == 0)
@@ -406,6 +427,22 @@ public partial class MainWindow : Window
         while (current is not null)
         {
             if (ReferenceEquals(current, BatchDropZone))
+            {
+                return true;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
+    private static bool IsPointerInsideViewer(DependencyObject? source)
+    {
+        var current = source;
+        while (current is not null)
+        {
+            if (current is ZoomPanImageViewer)
             {
                 return true;
             }

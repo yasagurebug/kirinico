@@ -18,18 +18,20 @@ using Rect = System.Windows.Rect;
 using RoutedEventArgs = System.Windows.RoutedEventArgs;
 using ScrollChangedEventArgs = System.Windows.Controls.ScrollChangedEventArgs;
 using Size = System.Windows.Size;
+using SizeChangedEventArgs = System.Windows.SizeChangedEventArgs;
 using UserControl = System.Windows.Controls.UserControl;
 using Cursors = System.Windows.Input.Cursors;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace Kirinico.App.Controls;
 
 public partial class ZoomPanImageViewer : UserControl
 {
     public static readonly DependencyProperty SourceProperty =
-        DependencyProperty.Register(nameof(Source), typeof(ImageSource), typeof(ZoomPanImageViewer));
+        DependencyProperty.Register(nameof(Source), typeof(ImageSource), typeof(ZoomPanImageViewer), new PropertyMetadata(null, OnSourceChanged));
 
     public static readonly DependencyProperty OverlaySourceProperty =
         DependencyProperty.Register(nameof(OverlaySource), typeof(ImageSource), typeof(ZoomPanImageViewer));
@@ -56,6 +58,7 @@ public partial class ZoomPanImageViewer : UserControl
         DependencyProperty.Register(nameof(InteractionCursor), typeof(Cursor), typeof(ZoomPanImageViewer), new PropertyMetadata(Cursors.Arrow, OnInteractionCursorChanged));
 
     private bool _isApplyingState;
+    private bool _isViewportApplyQueued;
     private bool _isPanning;
     private Point _panStartPosition;
     private double _panStartOffsetX;
@@ -66,6 +69,8 @@ public partial class ZoomPanImageViewer : UserControl
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        SizeChanged += OnViewerSizeChanged;
+        ViewerScroll.SizeChanged += OnViewerSizeChanged;
         ViewerScroll.LostMouseCapture += OnViewerLostMouseCapture;
     }
 
@@ -152,6 +157,11 @@ public partial class ZoomPanImageViewer : UserControl
         viewer.ApplyViewportState();
     }
 
+    private static void OnSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        ((ZoomPanImageViewer)d).ApplyViewportStateDeferred();
+    }
+
     private static void OnCoordinateScaleChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         ((ZoomPanImageViewer)d).ApplyViewportState();
@@ -175,7 +185,7 @@ public partial class ZoomPanImageViewer : UserControl
         }
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e) => ApplyViewportState();
+    private void OnLoaded(object sender, RoutedEventArgs e) => ApplyViewportStateDeferred();
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
@@ -183,9 +193,36 @@ public partial class ZoomPanImageViewer : UserControl
         {
             ViewportState.PropertyChanged -= OnViewportStatePropertyChanged;
         }
+
+        _isViewportApplyQueued = false;
     }
 
     private void OnViewportStatePropertyChanged(object? sender, PropertyChangedEventArgs e) => ApplyViewportState();
+
+    private void OnViewerSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_isApplyingState)
+        {
+            return;
+        }
+
+        ApplyViewportStateDeferred();
+    }
+
+    private void ApplyViewportStateDeferred()
+    {
+        if (!IsLoaded || _isViewportApplyQueued)
+        {
+            return;
+        }
+
+        _isViewportApplyQueued = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            _isViewportApplyQueued = false;
+            ApplyViewportState();
+        }));
+    }
 
     private void ApplyViewportState()
     {
@@ -205,7 +242,17 @@ public partial class ZoomPanImageViewer : UserControl
 
     private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (_isApplyingState || ViewportState is null)
+        if (_isApplyingState || ViewportState is null || Source is null || _isViewportApplyQueued)
+        {
+            return;
+        }
+
+        // Ignore layout/source replacement churn. Only user-driven offset changes should
+        // overwrite the shared viewport state.
+        if (Math.Abs(e.ExtentWidthChange) > 0.0001d ||
+            Math.Abs(e.ExtentHeightChange) > 0.0001d ||
+            Math.Abs(e.ViewportWidthChange) > 0.0001d ||
+            Math.Abs(e.ViewportHeightChange) > 0.0001d)
         {
             return;
         }

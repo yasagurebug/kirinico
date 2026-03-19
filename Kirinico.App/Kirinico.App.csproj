@@ -16,12 +16,20 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
-    <Version>1.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <AutoFileVersionBuild>$([System.DateTime]::UtcNow.ToString("MMdd"))</AutoFileVersionBuild>
-    <AutoFileVersionRevision>$([System.DateTime]::UtcNow.ToString("HHmm"))</AutoFileVersionRevision>
-    <FileVersion>1.0.$(AutoFileVersionBuild).$(AutoFileVersionRevision)</FileVersion>
-    <InformationalVersion>1.0</InformationalVersion>
+    <Version>2.0.0</Version>
+    <AssemblyVersion>$(Version).0</AssemblyVersion>
+    <AutoFileVersionSuffix>$([System.DateTime]::UtcNow.ToString("HHmm"))</AutoFileVersionSuffix>
+    <FileVersion>$(Version).$(AutoFileVersionSuffix)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <RepositoryRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\'))</RepositoryRoot>
+    <PythonVenvExecutable>$(RepositoryRoot).venv\Scripts\python.exe</PythonVenvExecutable>
+    <PythonWorkerEntryScript>$(RepositoryRoot)python_worker\main.py</PythonWorkerEntryScript>
+    <PythonWorkerBuildRoot>$(BaseIntermediateOutputPath)python_worker_build</PythonWorkerBuildRoot>
+    <PythonWorkerDistRoot>$(PythonWorkerBuildRoot)\dist</PythonWorkerDistRoot>
+    <PythonWorkerWorkRoot>$(PythonWorkerBuildRoot)\work</PythonWorkerWorkRoot>
+    <PythonWorkerSpecRoot>$(PythonWorkerBuildRoot)\spec</PythonWorkerSpecRoot>
+    <PythonWorkerBundleDir>$(PythonWorkerDistRoot)\Kirinico.PyWorker</PythonWorkerBundleDir>
+    <PythonWorkerExePath>$(PythonWorkerBundleDir)\Kirinico.PyWorker.exe</PythonWorkerExePath>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -39,5 +47,49 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
+
+  <ItemGroup>
+    <PythonWorkerSources Include="$(RepositoryRoot)python_worker\*.py" />
+  </ItemGroup>
+
+  <Target Name="BuildPythonWorker"
+          BeforeTargets="Build;Publish"
+          Inputs="@(PythonWorkerSources)"
+          Outputs="$(PythonWorkerExePath)">
+    <Error Condition="!Exists('$(PythonVenvExecutable)')"
+           Text="Python worker ビルド用の .venv Python が見つかりません: $(PythonVenvExecutable)" />
+    <RemoveDir Directories="$(PythonWorkerDistRoot)" />
+    <RemoveDir Directories="$(PythonWorkerWorkRoot)" />
+    <RemoveDir Directories="$(PythonWorkerSpecRoot)" />
+    <MakeDir Directories="$(PythonWorkerDistRoot)" />
+    <MakeDir Directories="$(PythonWorkerWorkRoot)" />
+    <MakeDir Directories="$(PythonWorkerSpecRoot)" />
+    <Exec Command="&quot;$(PythonVenvExecutable)&quot; -m PyInstaller --noconfirm --clean --onedir --name Kirinico.PyWorker --copy-metadata pymatting --hidden-import _multiprocessing --hidden-import multiprocessing.synchronize --hidden-import multiprocessing.spawn --hidden-import multiprocessing.popen_spawn_win32 --distpath &quot;$(PythonWorkerDistRoot)&quot; --workpath &quot;$(PythonWorkerWorkRoot)&quot; --specpath &quot;$(PythonWorkerSpecRoot)&quot; &quot;$(PythonWorkerEntryScript)&quot;" />
+  </Target>
+
+  <Target Name="CopyPythonWorkerToOutput"
+          AfterTargets="Build"
+          DependsOnTargets="BuildPythonWorker">
+    <Delete Files="$(OutDir)python_worker\main.py;$(OutDir)python_worker\main.pyc" ContinueOnError="true" />
+    <RemoveDir Directories="$(OutDir)python_worker\__pycache__" />
+    <ItemGroup>
+      <PythonWorkerBuiltFiles Include="$(PythonWorkerBundleDir)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PythonWorkerBuiltFiles)"
+          DestinationFiles="@(PythonWorkerBuiltFiles->'$(OutDir)python_worker\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyPythonWorkerToPublish"
+          AfterTargets="Publish"
+          DependsOnTargets="BuildPythonWorker">
+    <RemoveDir Directories="$(PublishDir)python_worker" />
+    <ItemGroup>
+      <PythonWorkerPublishedFiles Include="$(PythonWorkerBundleDir)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PythonWorkerPublishedFiles)"
+          DestinationFiles="@(PythonWorkerPublishedFiles->'$(PublishDir)python_worker\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>
