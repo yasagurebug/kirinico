@@ -186,7 +186,7 @@ public sealed class CharacterCutoutProcessor : IDisposable
             progress?.Report(new ProcessingProgress(20d, "粗マスクを生成"));
             using var backgroundMask0 = BuildBackgroundMask(referenceBgr, seeds, backgroundColor, parameters);
 
-        progress?.Report(new ProcessingProgress(25d, "背景側ノイズを整形"));
+            progress?.Report(new ProcessingProgress(25d, "背景側ノイズを整形"));
             using var backgroundMask1 = backgroundMask0.Clone();
             CleanupBackgroundMask(backgroundMask1, parameters.Internal.BackgroundThreshold);
 
