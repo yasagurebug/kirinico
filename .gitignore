@@ -656,3 +656,5 @@ specs/
 testdata/
 installer-output/Kirinico-Setup-1.0.exe
 temp/
+_build/
+_obj/
