@@ -13,8 +13,6 @@ public sealed class InternalSettings
 
 public sealed class MattingSettings
 {
-    public MattingMethod Method { get; set; } = MattingMethod.Cf;
-
     public CfMattingSettings Cf { get; set; } = new();
 
     public KnnMattingSettings Knn { get; set; } = new();
@@ -82,6 +80,8 @@ public sealed class LkmMattingSettings
 
 public sealed class BackgroundThresholdSettings
 {
+    public bool DistanceFromBackgroundOnly { get; set; }
+
     public double TbgMin { get; set; } = 2d;
 
     public double TbgMax { get; set; } = 64d;
@@ -121,6 +121,18 @@ public sealed class AlphaColorRestoreSettings
     public double EdgeConstraintMax { get; set; } = 1d;
 
     public double DespillStrength { get; set; } = 1d;
+
+    public bool DespillOnlyOnPartialAlpha { get; set; }
+
+    public double EdgeColorCorrectionAlphaMax { get; set; } = 0.98d;
+
+    public double EdgeColorCorrectionBgDistance { get; set; } = 48d;
+
+    public double EdgeColorCorrectionAlphaMin { get; set; } = 0.15d;
+
+    public double EdgeColorCorrectionAlphaPeak { get; set; } = 0.6d;
+
+    public double RestoreComplementProjectionMax { get; set; } = 0.15d;
 
     public double RestoreEpsilon { get; set; } = 0.02d;
 

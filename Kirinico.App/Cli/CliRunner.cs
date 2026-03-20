@@ -106,6 +106,10 @@ internal static class CliRunner
     {
         var ui = snapshot.Ui ?? new AppSettingsSnapshot.UiSettingsSnapshot();
         var outlineColor = ParseRequiredColor(ui.OutlineColorHex, new RgbColor(0, 0, 0));
+        var internalSettings = CloneInternalSettings(snapshot.Internal ?? new InternalSettings());
+        internalSettings.BackgroundThreshold.DistanceFromBackgroundOnly = ui.ContourSettingMethod == ContourSettingMethod.Width;
+        internalSettings.AlphaColorRestore.DespillOnlyOnPartialAlpha = ui.DespillDetectionMethod == DespillDetectionMethod.AlphaBand;
+        internalSettings.AlphaColorRestore.DespillStrength = ui.DespillStrength;
 
         return new CutoutParameters
         {
@@ -115,7 +119,11 @@ internal static class CliRunner
             ContourTolerance = ui.ContourTolerance,
             MaxContourWidthPx = (int)Math.Round(Math.Clamp(ui.MaxContourWidth, 0d, 1d) * 128d),
             DenoiseStrength = ui.DenoiseStrength,
+            MattingMethod = ui.ContourInferenceMethod,
             TransparencyCut = ui.TransparencyCut,
+            DespillDetectionStrength = ui.DespillDetectionStrength,
+            DespillDetectionWidthPx = (int)Math.Round(Math.Clamp(ui.DespillDetectionWidth, 0d, 1d) * 10d),
+            EnableEdgeColorCorrection = ui.EnableEdgeColorCorrection,
             EdgeCorrectionStrength = ui.EdgeCorrectionStrength,
             EdgeRepresentativeColor = ParseOptionalColor(ui.EdgeRepresentativeColorHex),
             Resize = new ResizeOptions
@@ -132,9 +140,82 @@ internal static class CliRunner
                 Color = outlineColor,
                 Thickness = ui.OutlineThickness,
             },
-            Internal = snapshot.Internal ?? new InternalSettings(),
+            Internal = internalSettings,
         };
     }
+
+    private static InternalSettings CloneInternalSettings(InternalSettings source)
+        => new()
+        {
+            Matting = new MattingSettings
+            {
+                Cf = new CfMattingSettings
+                {
+                    MaxIters = source.Matting.Cf.MaxIters,
+                    Tolerance = source.Matting.Cf.Tolerance,
+                    Preconditioner = source.Matting.Cf.Preconditioner,
+                    DiscardThreshold = source.Matting.Cf.DiscardThreshold,
+                    Shift = source.Matting.Cf.Shift,
+                    Epsilon = source.Matting.Cf.Epsilon,
+                    Radius = source.Matting.Cf.Radius,
+                },
+                Knn = new KnnMattingSettings
+                {
+                    MaxIters = source.Matting.Knn.MaxIters,
+                    Tolerance = source.Matting.Knn.Tolerance,
+                    Preconditioner = source.Matting.Knn.Preconditioner,
+                    DiscardThreshold = source.Matting.Knn.DiscardThreshold,
+                    Shift = source.Matting.Knn.Shift,
+                    Neighbors1 = source.Matting.Knn.Neighbors1,
+                    Neighbors2 = source.Matting.Knn.Neighbors2,
+                    DistanceWeight1 = source.Matting.Knn.DistanceWeight1,
+                    DistanceWeight2 = source.Matting.Knn.DistanceWeight2,
+                    Kernel = source.Matting.Knn.Kernel,
+                },
+                Lkm = new LkmMattingSettings
+                {
+                    MaxIters = source.Matting.Lkm.MaxIters,
+                    Tolerance = source.Matting.Lkm.Tolerance,
+                    Epsilon = source.Matting.Lkm.Epsilon,
+                    Radius = source.Matting.Lkm.Radius,
+                },
+            },
+            BackgroundThreshold = new BackgroundThresholdSettings
+            {
+                TbgMin = source.BackgroundThreshold.TbgMin,
+                TbgMax = source.BackgroundThreshold.TbgMax,
+                TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin,
+                TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax,
+                BgNoiseMinArea = source.BackgroundThreshold.BgNoiseMinArea,
+                BgNoiseMaxHoleArea = source.BackgroundThreshold.BgNoiseMaxHoleArea,
+                DistanceFromBackgroundOnly = source.BackgroundThreshold.DistanceFromBackgroundOnly,
+            },
+            Preprocess = new PreprocessSettings
+            {
+                DenoiseRadiusMin = source.Preprocess.DenoiseRadiusMin,
+                DenoiseRadiusMax = source.Preprocess.DenoiseRadiusMax,
+                DenoiseSigmaMin = source.Preprocess.DenoiseSigmaMin,
+                DenoiseSigmaMax = source.Preprocess.DenoiseSigmaMax,
+            },
+            AlphaColorRestore = new AlphaColorRestoreSettings
+            {
+                AlphaCutMin = source.AlphaColorRestore.AlphaCutMin,
+                AlphaCutMax = source.AlphaColorRestore.AlphaCutMax,
+                MidAlphaUpperMin = source.AlphaColorRestore.MidAlphaUpperMin,
+                MidAlphaUpperMax = source.AlphaColorRestore.MidAlphaUpperMax,
+                EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin,
+                EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax,
+                DespillStrength = source.AlphaColorRestore.DespillStrength,
+                DespillOnlyOnPartialAlpha = source.AlphaColorRestore.DespillOnlyOnPartialAlpha,
+                EdgeColorCorrectionAlphaMax = source.AlphaColorRestore.EdgeColorCorrectionAlphaMax,
+                EdgeColorCorrectionBgDistance = source.AlphaColorRestore.EdgeColorCorrectionBgDistance,
+                EdgeColorCorrectionAlphaMin = source.AlphaColorRestore.EdgeColorCorrectionAlphaMin,
+                EdgeColorCorrectionAlphaPeak = source.AlphaColorRestore.EdgeColorCorrectionAlphaPeak,
+                RestoreComplementProjectionMax = source.AlphaColorRestore.RestoreComplementProjectionMax,
+                RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon,
+                UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided,
+            },
+        };
 
     private static ManualEditMaps? BuildManualEditMaps(AppSettingsSnapshot.UiSettingsSnapshot? ui, OpenCvSharp.Size sourceSize)
     {

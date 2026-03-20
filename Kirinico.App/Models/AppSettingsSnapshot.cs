@@ -19,6 +19,8 @@ public sealed class AppSettingsSnapshot
 
         public double BackgroundTolerance { get; set; } = 0.5d;
 
+        public ContourSettingMethod ContourSettingMethod { get; set; } = ContourSettingMethod.Width;
+
         public double ContourTolerance { get; set; } = 0.4d;
 
         public double MaxContourWidth { get; set; } = 0.1d;
@@ -30,6 +32,16 @@ public sealed class AppSettingsSnapshot
         public List<SeedPointSnapshot> BackgroundSeeds { get; set; } = [];
 
         public double TransparencyCut { get; set; } = 0.15d;
+
+        public DespillDetectionMethod DespillDetectionMethod { get; set; } = DespillDetectionMethod.AlphaBand;
+
+        public double DespillDetectionStrength { get; set; } = 0.6d;
+
+        public double DespillDetectionWidth { get; set; } = 0.3d;
+
+        public double DespillStrength { get; set; } = 1.0d;
+
+        public bool EnableEdgeColorCorrection { get; set; } = true;
 
         public double EdgeCorrectionStrength { get; set; } = 0.5d;
 

@@ -90,7 +90,7 @@ public sealed class CharacterCutoutProcessor : IDisposable
 
         using var alphaMask = CountUnknownPixels(prepared.TrimapMask) < MinUnknownPixelsForMatting
             ? CreateBinaryAlphaMask(prepared.TrimapMask)
-            : EstimateAlphaWithMatting(prepared.ReferenceBgr, prepared.TrimapMask, parameters.Internal.Matting, progress);
+            : EstimateAlphaWithMatting(prepared.ReferenceBgr, prepared.TrimapMask, parameters.MattingMethod, parameters.Internal.Matting, progress);
 
         if (alphaMask is null)
         {
@@ -121,6 +121,7 @@ public sealed class CharacterCutoutProcessor : IDisposable
         progress?.Report(new ProcessingProgress(90d, "前景色を復元"));
         using var restoredStraightBgra = RestoreStraightBgra(
             preResizeResult.OriginalBgr,
+            preResizeResult.TrimapMask,
             preResizeResult.AlphaMask,
             preResizeResult.ResolvedBackgroundColor,
             parameters);
@@ -317,15 +318,22 @@ public sealed class CharacterCutoutProcessor : IDisposable
 
     private static Mat BuildForegroundMask(Mat sourceBgr, Mat backgroundMask1, Mat backgroundDistance, RgbColor background, CutoutParameters parameters)
     {
-        var threshold = ComputeBackgroundThreshold(parameters);
-        var foregroundThreshold = threshold + ComputeForegroundDelta(parameters);
-
-        var result = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_8UC1, Scalar.Black);
         var sourceIndexer = sourceBgr.GetGenericIndexer<Vec3b>();
+        var result = new Mat(sourceBgr.Rows, sourceBgr.Cols, MatType.CV_8UC1, Scalar.Black);
         var distanceIndexer = backgroundDistance.GetGenericIndexer<float>();
         var backgroundIndexer = backgroundMask1.GetGenericIndexer<byte>();
         var resultIndexer = result.GetGenericIndexer<byte>();
         var maxContourWidth = ComputeMaxContourWidth(parameters);
+        var distanceFromBackgroundOnly = parameters.Internal.BackgroundThreshold.DistanceFromBackgroundOnly;
+
+        float threshold = 0f;
+        float foregroundThreshold = 0f;
+
+        if (!distanceFromBackgroundOnly)
+        {
+            threshold = ComputeBackgroundThreshold(parameters);
+            foregroundThreshold = threshold + ComputeForegroundDelta(parameters);
+        }
 
         for (var y = 0; y < sourceBgr.Rows; y++)
         {
@@ -333,6 +341,16 @@ public sealed class CharacterCutoutProcessor : IDisposable
             {
                 if (backgroundIndexer[y, x] != 0)
                 {
+                    continue;
+                }
+
+                if (distanceFromBackgroundOnly)
+                {
+                    if (distanceIndexer[y, x] >= maxContourWidth)
+                    {
+                        resultIndexer[y, x] = 255;
+                    }
+
                     continue;
                 }
 
@@ -396,7 +414,7 @@ public sealed class CharacterCutoutProcessor : IDisposable
         return trimap;
     }
 
-    private static Mat RestoreStraightBgra(Mat originalBgr, Mat alphaMask, RgbColor background, CutoutParameters parameters)
+    private static Mat RestoreStraightBgra(Mat originalBgr, Mat trimapMask, Mat alphaMask, RgbColor background, CutoutParameters parameters)
     {
         var result = new Mat(originalBgr.Rows, originalBgr.Cols, MatType.CV_8UC4, Scalar.All(0d));
         var sourceIndexer = originalBgr.GetGenericIndexer<Vec3b>();
@@ -409,9 +427,8 @@ public sealed class CharacterCutoutProcessor : IDisposable
         var distanceIndexer = despillDistance.GetGenericIndexer<float>();
         var edgeStrength = ShapeUiStrength((float)parameters.EdgeCorrectionStrength);
         var w = Lerp((float)restore.EdgeConstraintMin, (float)restore.EdgeConstraintMax, edgeStrength);
-        var a1 = Lerp((float)restore.MidAlphaUpperMin, (float)restore.MidAlphaUpperMax, edgeStrength);
-        a1 = MathF.Max(a1, a0 + 1e-6f);
-        var despillStrength = (float)restore.DespillStrength;
+        var despillStrength = (float)Math.Clamp(restore.DespillStrength, 0d, 1d);
+        var useDespill = despillStrength > 0f;
         var edgeColor = parameters.EdgeRepresentativeColor;
         var useEdgeColor = edgeColor.HasValue || !restore.UseEdgeColorOnlyIfProvided;
         var backgroundMean = (background.R + background.G + background.B) / 3f;
@@ -422,8 +439,20 @@ public sealed class CharacterCutoutProcessor : IDisposable
             (backgroundDirectionB * backgroundDirectionB) +
             (backgroundDirectionG * backgroundDirectionG) +
             (backgroundDirectionR * backgroundDirectionR);
-        var useDespill = despillStrength > 0f && backgroundDirectionNormSquared > 1e-3f;
-        var maxContourWidth = ComputeMaxContourWidth(parameters);
+        var despillDetectionWidth = Math.Max(0, parameters.DespillDetectionWidthPx);
+        var despillOnlyOnPartialAlpha = restore.DespillOnlyOnPartialAlpha;
+        var despillMaxAlpha = (float)Math.Clamp(parameters.DespillDetectionStrength * 255f, 0f, 255f);
+        var dominantBackgroundChannel = GetDominantBackgroundChannel(background);
+        var restoreAlphaMinimumFactor = 0.35f;
+        var restoreAlphaReference = 0.85f;
+        var restoreComplementProjectionMax = (float)Math.Max(0d, restore.RestoreComplementProjectionMax);
+        var edgeColorCorrectionAlphaMax = (float)Math.Clamp(restore.EdgeColorCorrectionAlphaMax, 0d, 1d);
+        var edgeColorCorrectionBgDistance = MathF.Max(0f, (float)restore.EdgeColorCorrectionBgDistance);
+        var edgeColorCorrectionAlphaMin = Math.Clamp((float)restore.EdgeColorCorrectionAlphaMin, 0f, edgeColorCorrectionAlphaMax);
+        var edgeColorCorrectionAlphaPeak = Math.Clamp(
+            (float)restore.EdgeColorCorrectionAlphaPeak,
+            edgeColorCorrectionAlphaMin,
+            edgeColorCorrectionAlphaMax);
 
         for (var y = 0; y < originalBgr.Rows; y++)
         {
@@ -437,12 +466,59 @@ public sealed class CharacterCutoutProcessor : IDisposable
                 }
 
                 var observed = sourceIndexer[y, x];
-                var invAlpha = 1f / MathF.Max(alpha, (float)restore.RestoreEpsilon);
-                var restoredB = (observed.Item0 - ((1f - alpha) * background.B)) * invAlpha;
-                var restoredG = (observed.Item1 - ((1f - alpha) * background.G)) * invAlpha;
-                var restoredR = (observed.Item2 - ((1f - alpha) * background.R)) * invAlpha;
+                var restoredB = (float)observed.Item0;
+                var restoredG = (float)observed.Item1;
+                var restoredR = (float)observed.Item2;
+                var shouldApplyColorSpillCorrection = false;
+                if (backgroundDirectionNormSquared > 1e-3f)
+                {
+                    if (despillOnlyOnPartialAlpha)
+                    {
+                        shouldApplyColorSpillCorrection = alphaIndexer[y, x] > 0 && alphaIndexer[y, x] <= despillMaxAlpha;
+                    }
+                    else
+                    {
+                        shouldApplyColorSpillCorrection = distanceIndexer[y, x] <= despillDetectionWidth;
+                    }
 
-                if (useDespill && distanceIndexer[y, x] <= maxContourWidth)
+                    shouldApplyColorSpillCorrection &= alpha < 1f;
+                }
+
+                if (shouldApplyColorSpillCorrection && alpha < 1f)
+                {
+                    var invAlpha = 1f / MathF.Max(alpha, (float)restore.RestoreEpsilon);
+                    var restoredB0 = (observed.Item0 - ((1f - alpha) * background.B)) * invAlpha;
+                    var restoredG0 = (observed.Item1 - ((1f - alpha) * background.G)) * invAlpha;
+                    var restoredR0 = (observed.Item2 - ((1f - alpha) * background.R)) * invAlpha;
+                    var restoreAlphaFactor = Lerp(
+                        restoreAlphaMinimumFactor,
+                        1f,
+                        Smoothstep(a0, restoreAlphaReference, alpha));
+                    restoredB = Lerp(observed.Item0, restoredB0, restoreAlphaFactor);
+                    restoredG = Lerp(observed.Item1, restoredG0, restoreAlphaFactor);
+                    restoredR = Lerp(observed.Item2, restoredR0, restoreAlphaFactor);
+
+                    if (restoreComplementProjectionMax > 0f)
+                    {
+                        var deltaB = restoredB - observed.Item0;
+                        var deltaG = restoredG - observed.Item1;
+                        var deltaR = restoredR - observed.Item2;
+                        var backgroundProjection =
+                            ((deltaB * backgroundDirectionB) +
+                             (deltaG * backgroundDirectionG) +
+                             (deltaR * backgroundDirectionR)) / backgroundDirectionNormSquared;
+
+                        if (backgroundProjection < -restoreComplementProjectionMax)
+                        {
+                            var correction = (-restoreComplementProjectionMax) - backgroundProjection;
+                            restoredB += correction * backgroundDirectionB;
+                            restoredG += correction * backgroundDirectionG;
+                            restoredR += correction * backgroundDirectionR;
+                        }
+                    }
+                }
+
+                if (useDespill && shouldApplyColorSpillCorrection)
                 {
                     var restoredMean = (restoredR + restoredG + restoredB) / 3f;
                     var centeredB = restoredB - restoredMean;
@@ -459,18 +535,21 @@ public sealed class CharacterCutoutProcessor : IDisposable
                         restoredB -= despillAmount * backgroundDirectionB;
                         restoredG -= despillAmount * backgroundDirectionG;
                         restoredR -= despillAmount * backgroundDirectionR;
+                        ClampDominantChannelAfterDespill(ref restoredB, ref restoredG, ref restoredR, dominantBackgroundChannel);
                     }
                 }
 
-
-                if (useEdgeColor && edgeColor.HasValue && alpha < a1)
+                if (parameters.EnableEdgeColorCorrection && useEdgeColor && edgeColor.HasValue && alpha < edgeColorCorrectionAlphaMax)
                 {
-                    var u = Math.Clamp((a1 - alpha) / Math.Max(a1 - a0, 1e-6f), 0f, 1f);
-                    var s = Smoothstep(0f, 1f, u);
-                    var baseBlend = w * s;
-                    var lowAlphaBoost = 1f - Smoothstep(a0, 0.5f, alpha);
-                    var blend = 1f - ((1f - baseBlend) * (1f - (w * lowAlphaBoost)));
-                    blend = Math.Clamp(blend, 0f, 1f);
+                    var correctedPixel = new Vec3b(
+                        ClampToByte(restoredB),
+                        ClampToByte(restoredG),
+                        ClampToByte(restoredR));
+                    var backgroundDistance = ComputeColorDistance(correctedPixel, background);
+                    var backgroundWeight = 1f - Smoothstep(0f, edgeColorCorrectionBgDistance, backgroundDistance);
+                    backgroundWeight *= backgroundWeight;
+                    var alphaWeight = Smoothstep(edgeColorCorrectionAlphaMin, edgeColorCorrectionAlphaPeak, alpha);
+                    var blend = Math.Clamp(w * backgroundWeight * alphaWeight, 0f, 1f);
                     restoredB = Lerp(restoredB, edgeColor.Value.B, blend);
                     restoredG = Lerp(restoredG, edgeColor.Value.G, blend);
                     restoredR = Lerp(restoredR, edgeColor.Value.R, blend);
@@ -487,10 +566,10 @@ public sealed class CharacterCutoutProcessor : IDisposable
         return result;
     }
 
-    private Mat? EstimateAlphaWithMatting(Mat referenceBgr, Mat trimapMask, MattingSettings settings, IProgress<ProcessingProgress>? progress)
+    private Mat? EstimateAlphaWithMatting(Mat referenceBgr, Mat trimapMask, MattingMethod method, MattingSettings settings, IProgress<ProcessingProgress>? progress)
     {
         progress?.Report(new ProcessingProgress(30d, "PyMatting で alpha を推定"));
-        return _alphaEstimator.EstimateAlpha(referenceBgr, trimapMask, settings);
+        return _alphaEstimator.EstimateAlpha(referenceBgr, trimapMask, method, settings);
     }
 
     private static int CountUnknownPixels(Mat trimapMask)
@@ -868,6 +947,37 @@ public sealed class CharacterCutoutProcessor : IDisposable
 
     private static byte ClampToByte(double value) => (byte)Math.Clamp((int)Math.Round(value), 0, 255);
 
+    private static DominantColorChannel GetDominantBackgroundChannel(RgbColor background)
+    {
+        if (background.G >= background.R && background.G >= background.B)
+        {
+            return DominantColorChannel.Green;
+        }
+
+        if (background.R >= background.B)
+        {
+            return DominantColorChannel.Red;
+        }
+
+        return DominantColorChannel.Blue;
+    }
+
+    private static void ClampDominantChannelAfterDespill(ref float blue, ref float green, ref float red, DominantColorChannel channel)
+    {
+        switch (channel)
+        {
+            case DominantColorChannel.Red:
+                red = MathF.Max(red, MathF.Max(green, blue));
+                break;
+            case DominantColorChannel.Green:
+                green = MathF.Max(green, MathF.Max(red, blue));
+                break;
+            case DominantColorChannel.Blue:
+                blue = MathF.Max(blue, MathF.Max(red, green));
+                break;
+        }
+    }
+
     private static float Smoothstep(float edge0, float edge1, float x)
     {
         var t = Math.Clamp((x - edge0) / Math.Max(edge1 - edge0, 1e-6f), 0f, 1f);
@@ -883,5 +993,12 @@ public sealed class CharacterCutoutProcessor : IDisposable
     private static float Lerp(float start, float end, float amount) => start + ((end - start) * Math.Clamp(amount, 0f, 1f));
 
     private static float Lerp(int start, int end, double amount) => start + ((end - start) * (float)Math.Clamp(amount, 0d, 1d));
+    private enum DominantColorChannel
+    {
+        Red,
+        Green,
+        Blue,
+    }
+
     private readonly record struct SeedInfo(Point Point, Vec3f Color);
 }

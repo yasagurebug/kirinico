@@ -66,11 +66,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private BackgroundSpecificationMode _selectedBackgroundSpecificationMode = BackgroundSpecificationMode.ColorRange;
     private string _backgroundColorHex = "FFFFFF";
     private double _backgroundTolerance = 0.5d;
+    private ContourSettingMethod _selectedContourSettingMethod = ContourSettingMethod.Width;
     private double _noiseRemoval = 0.3d;
     private double _contourTolerance = 0.4d;
     private double _maxContourWidth = 0.1d;
     private MattingMethod _selectedContourInferenceMethod = MattingMethod.Cf;
     private double _transparencyCut = 0.15d;
+    private DespillDetectionMethod _selectedDespillDetectionMethod = DespillDetectionMethod.AlphaBand;
+    private double _despillDetectionStrength = 0.6d;
+    private double _despillDetectionWidth = 0.3d;
+    private double _despillStrength = 1.0d;
+    private bool _enableEdgeColorCorrection = true;
     private double _edgeCorrectionStrength = 0.5d;
     private string _lineColorHex = string.Empty;
     private double _scalePercent = 100d;
@@ -149,6 +155,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     [
         new SelectionOption<MattingMethod>(MattingMethod.Cf, "高速"),
         new SelectionOption<MattingMethod>(MattingMethod.Knn, "精密"),
+    ];
+
+    public IReadOnlyList<SelectionOption<ContourSettingMethod>> ContourSettingMethodOptions { get; } =
+    [
+        new SelectionOption<ContourSettingMethod>(ContourSettingMethod.Width, "幅"),
+        new SelectionOption<ContourSettingMethod>(ContourSettingMethod.ColorDifference, "色差"),
+    ];
+
+    public IReadOnlyList<SelectionOption<DespillDetectionMethod>> DespillDetectionMethodOptions { get; } =
+    [
+        new SelectionOption<DespillDetectionMethod>(DespillDetectionMethod.AlphaBand, "透明帯"),
+        new SelectionOption<DespillDetectionMethod>(DespillDetectionMethod.Width, "幅"),
     ];
 
     public ViewportState SharedViewport { get; } = new();
@@ -394,6 +412,23 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public ContourSettingMethod SelectedContourSettingMethod
+    {
+        get => _selectedContourSettingMethod;
+        set
+        {
+            if (SetProperty(ref _selectedContourSettingMethod, value))
+            {
+                OnPropertyChanged(nameof(ContourToleranceVisibility));
+                MarkPreviewDirty(PreviewDirtyKind.Trimap);
+            }
+        }
+    }
+
+    public Visibility ContourToleranceVisibility => SelectedContourSettingMethod == ContourSettingMethod.Width
+        ? Visibility.Collapsed
+        : Visibility.Visible;
+
     public double MaxContourWidth
     {
         get => _maxContourWidth;
@@ -431,6 +466,82 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
         }
     }
+
+    public DespillDetectionMethod SelectedDespillDetectionMethod
+    {
+        get => _selectedDespillDetectionMethod;
+        set
+        {
+            if (SetProperty(ref _selectedDespillDetectionMethod, value))
+            {
+                OnPropertyChanged(nameof(DespillDetectionStrengthVisibility));
+                OnPropertyChanged(nameof(DespillDetectionWidthVisibility));
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
+            }
+        }
+    }
+
+    public Visibility DespillDetectionStrengthVisibility => SelectedDespillDetectionMethod == DespillDetectionMethod.Width
+        ? Visibility.Collapsed
+        : Visibility.Visible;
+
+    public Visibility DespillDetectionWidthVisibility => SelectedDespillDetectionMethod == DespillDetectionMethod.Width
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public double DespillDetectionStrength
+    {
+        get => _despillDetectionStrength;
+        set
+        {
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _despillDetectionStrength, sanitized))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
+            }
+        }
+    }
+
+    public double DespillDetectionWidth
+    {
+        get => _despillDetectionWidth;
+        set
+        {
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _despillDetectionWidth, sanitized))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
+            }
+        }
+    }
+
+    public double DespillStrength
+    {
+        get => _despillStrength;
+        set
+        {
+            var sanitized = Math.Clamp(value, 0d, 1d);
+            if (SetProperty(ref _despillStrength, sanitized))
+            {
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
+            }
+        }
+    }
+
+    public bool EnableEdgeColorCorrection
+    {
+        get => _enableEdgeColorCorrection;
+        set
+        {
+            if (SetProperty(ref _enableEdgeColorCorrection, value))
+            {
+                OnPropertyChanged(nameof(AreEdgeCorrectionControlsEnabled));
+                MarkPreviewDirty(PreviewDirtyKind.Presentation);
+            }
+        }
+    }
+
+    public bool AreEdgeCorrectionControlsEnabled => EnableEdgeColorCorrection;
 
     public double EdgeCorrectionStrength
     {
@@ -1448,12 +1559,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             BackgroundSpecificationMode = SelectedBackgroundSpecificationMode,
             BackgroundColorHex = BackgroundColorHex,
             BackgroundTolerance = BackgroundTolerance,
+            ContourSettingMethod = SelectedContourSettingMethod,
             ContourTolerance = ContourTolerance,
             MaxContourWidth = MaxContourWidth,
             DenoiseStrength = NoiseRemoval,
             ContourInferenceMethod = SelectedContourInferenceMethod,
             BackgroundSeeds = CollectSeedSnapshots(),
             TransparencyCut = TransparencyCut,
+            DespillDetectionMethod = SelectedDespillDetectionMethod,
+            DespillDetectionStrength = DespillDetectionStrength,
+            DespillDetectionWidth = DespillDetectionWidth,
+            DespillStrength = DespillStrength,
+            EnableEdgeColorCorrection = EnableEdgeColorCorrection,
             EdgeCorrectionStrength = EdgeCorrectionStrength,
             EdgeRepresentativeColorHex = string.IsNullOrWhiteSpace(LineColorHex) ? null : LineColorHex,
             AutoReprocess = AutoReprocess,
@@ -1477,11 +1594,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             SelectedBackgroundSpecificationMode = defaults.BackgroundSpecificationMode;
             BackgroundColorHex = backgroundColorHex;
             BackgroundTolerance = defaults.BackgroundTolerance;
+            SelectedContourSettingMethod = defaults.ContourSettingMethod;
             NoiseRemoval = defaults.DenoiseStrength;
             ContourTolerance = defaults.ContourTolerance;
             MaxContourWidth = defaults.MaxContourWidth;
             SelectedContourInferenceMethod = defaults.ContourInferenceMethod;
             TransparencyCut = defaults.TransparencyCut;
+            SelectedDespillDetectionMethod = defaults.DespillDetectionMethod;
+            DespillDetectionStrength = defaults.DespillDetectionStrength;
+            DespillDetectionWidth = defaults.DespillDetectionWidth;
+            DespillStrength = defaults.DespillStrength;
+            EnableEdgeColorCorrection = defaults.EnableEdgeColorCorrection;
             EdgeCorrectionStrength = defaults.EdgeCorrectionStrength;
             LineColorHex = defaults.EdgeRepresentativeColorHex ?? string.Empty;
             AutoReprocess = defaults.AutoReprocess;
@@ -1519,11 +1642,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             SelectedBackgroundSpecificationMode = ui.BackgroundSpecificationMode;
             BackgroundColorHex = ui.BackgroundColorHex;
             BackgroundTolerance = ui.BackgroundTolerance;
+            SelectedContourSettingMethod = ui.ContourSettingMethod;
             NoiseRemoval = ui.DenoiseStrength;
             ContourTolerance = ui.ContourTolerance;
             MaxContourWidth = ui.MaxContourWidth;
             SelectedContourInferenceMethod = ui.ContourInferenceMethod;
             TransparencyCut = ui.TransparencyCut;
+            SelectedDespillDetectionMethod = ui.DespillDetectionMethod;
+            DespillDetectionStrength = ui.DespillDetectionStrength;
+            DespillDetectionWidth = ui.DespillDetectionWidth;
+            DespillStrength = ui.DespillStrength;
+            EnableEdgeColorCorrection = ui.EnableEdgeColorCorrection;
             EdgeCorrectionStrength = ui.EdgeCorrectionStrength;
             LineColorHex = ui.EdgeRepresentativeColorHex ?? string.Empty;
             ScalePercent = ui.ScalePercent;
@@ -1581,7 +1710,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _internalSettings.Matting.Method = source.Matting.Method;
         _internalSettings.Matting.Cf.MaxIters = source.Matting.Cf.MaxIters;
         _internalSettings.Matting.Cf.Tolerance = source.Matting.Cf.Tolerance;
         _internalSettings.Matting.Cf.Preconditioner = source.Matting.Cf.Preconditioner;
@@ -1605,6 +1733,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _internalSettings.Matting.Lkm.Radius = source.Matting.Lkm.Radius;
 
         _internalSettings.BackgroundThreshold.TbgMin = source.BackgroundThreshold.TbgMin;
+        _internalSettings.BackgroundThreshold.DistanceFromBackgroundOnly = source.BackgroundThreshold.DistanceFromBackgroundOnly;
         _internalSettings.BackgroundThreshold.TbgMax = source.BackgroundThreshold.TbgMax;
         _internalSettings.BackgroundThreshold.TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin;
         _internalSettings.BackgroundThreshold.TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax;
@@ -1623,6 +1752,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _internalSettings.AlphaColorRestore.EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin;
         _internalSettings.AlphaColorRestore.EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax;
         _internalSettings.AlphaColorRestore.DespillStrength = source.AlphaColorRestore.DespillStrength;
+        _internalSettings.AlphaColorRestore.DespillOnlyOnPartialAlpha = source.AlphaColorRestore.DespillOnlyOnPartialAlpha;
+        _internalSettings.AlphaColorRestore.EdgeColorCorrectionAlphaMax = source.AlphaColorRestore.EdgeColorCorrectionAlphaMax;
+        _internalSettings.AlphaColorRestore.EdgeColorCorrectionBgDistance = source.AlphaColorRestore.EdgeColorCorrectionBgDistance;
+        _internalSettings.AlphaColorRestore.EdgeColorCorrectionAlphaMin = source.AlphaColorRestore.EdgeColorCorrectionAlphaMin;
+        _internalSettings.AlphaColorRestore.EdgeColorCorrectionAlphaPeak = source.AlphaColorRestore.EdgeColorCorrectionAlphaPeak;
+        _internalSettings.AlphaColorRestore.RestoreComplementProjectionMax = source.AlphaColorRestore.RestoreComplementProjectionMax;
         _internalSettings.AlphaColorRestore.RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon;
         _internalSettings.AlphaColorRestore.UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided;
     }
@@ -1987,7 +2122,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ? parsedOutline
             : new RgbColor(0, 0, 0);
         var internalSettings = CloneInternalSettings(_internalSettings);
-        internalSettings.Matting.Method = SelectedContourInferenceMethod;
+        internalSettings.BackgroundThreshold.DistanceFromBackgroundOnly = SelectedContourSettingMethod == ContourSettingMethod.Width;
+        internalSettings.AlphaColorRestore.DespillOnlyOnPartialAlpha = SelectedDespillDetectionMethod == DespillDetectionMethod.AlphaBand;
+        internalSettings.AlphaColorRestore.DespillStrength = DespillStrength;
 
         return new CutoutParameters
         {
@@ -1999,7 +2136,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             DenoiseStrength = NoiseRemoval,
             ContourTolerance = ContourTolerance,
             MaxContourWidthPx = (int)Math.Round(MaxContourWidth * 128d),
+            MattingMethod = SelectedContourInferenceMethod,
             TransparencyCut = TransparencyCut,
+            DespillDetectionStrength = DespillDetectionStrength,
+            DespillDetectionWidthPx = (int)Math.Round(DespillDetectionWidth * 10d),
+            EnableEdgeColorCorrection = EnableEdgeColorCorrection,
             EdgeCorrectionStrength = EdgeCorrectionStrength,
             EdgeRepresentativeColor = RgbColor.TryParseHex(LineColorHex, out var parsedLineColor)
                 ? parsedLineColor
@@ -2028,7 +2169,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             Matting = new MattingSettings
             {
-                Method = source.Matting.Method,
                 Cf = new CfMattingSettings
                 {
                     MaxIters = source.Matting.Cf.MaxIters,
@@ -2060,9 +2200,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     Radius = source.Matting.Lkm.Radius,
                 },
             },
-            BackgroundThreshold = new BackgroundThresholdSettings
-            {
-                TbgMin = source.BackgroundThreshold.TbgMin,
+                BackgroundThreshold = new BackgroundThresholdSettings
+                {
+                    DistanceFromBackgroundOnly = source.BackgroundThreshold.DistanceFromBackgroundOnly,
+                    TbgMin = source.BackgroundThreshold.TbgMin,
                 TbgMax = source.BackgroundThreshold.TbgMax,
                 TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin,
                 TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax,
@@ -2085,6 +2226,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin,
                 EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax,
                 DespillStrength = source.AlphaColorRestore.DespillStrength,
+                DespillOnlyOnPartialAlpha = source.AlphaColorRestore.DespillOnlyOnPartialAlpha,
+                EdgeColorCorrectionAlphaMax = source.AlphaColorRestore.EdgeColorCorrectionAlphaMax,
+                EdgeColorCorrectionBgDistance = source.AlphaColorRestore.EdgeColorCorrectionBgDistance,
+                EdgeColorCorrectionAlphaMin = source.AlphaColorRestore.EdgeColorCorrectionAlphaMin,
+                EdgeColorCorrectionAlphaPeak = source.AlphaColorRestore.EdgeColorCorrectionAlphaPeak,
+                RestoreComplementProjectionMax = source.AlphaColorRestore.RestoreComplementProjectionMax,
                 RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon,
                 UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided,
             },
@@ -2192,7 +2339,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     }
 
     private static string FormatCoordinateStatus(string label, int x, int y, RgbColor color, double alphaPercent)
-        => $"{label} ({x},{y}) {color.ToHex()} {alphaPercent:0}%";
+        => $"{label} ({x},{y}) {color.ToHex()} {alphaPercent:0.0}%";
 
     private static int ToPixelIndex(double coordinate, int size)
     {

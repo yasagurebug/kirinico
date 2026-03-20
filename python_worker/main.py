@@ -110,7 +110,7 @@ def estimate_alpha(request: dict) -> dict:
     trimap_path = request["trimapPath"]
     output_alpha_path = request["outputAlphaPath"]
     settings = request.get("settings", {})
-    method = _normalize_method(settings.get("method"))
+    method = _normalize_method(request.get("method"))
     cf = settings.get("cf", {})
     knn = settings.get("knn", {})
     lkm = settings.get("lkm", {})
@@ -163,7 +163,7 @@ def estimate_alpha(request: dict) -> dict:
                 cg_kwargs=cg_kwargs,
             )
         else:
-            raise ValueError(f"unsupported matting method: {settings.get('method')}")
+            raise ValueError(f"unsupported matting method: {request.get('method')}")
 
     Path(output_alpha_path).parent.mkdir(parents=True, exist_ok=True)
     save_alpha(output_alpha_path, alpha)

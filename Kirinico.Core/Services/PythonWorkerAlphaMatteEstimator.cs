@@ -35,7 +35,7 @@ public sealed class PythonWorkerAlphaMatteEstimator : IAlphaMatteEstimator
         _options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
-    public Mat? EstimateAlpha(Mat referenceBgr, Mat trimapMask, MattingSettings settings)
+    public Mat? EstimateAlpha(Mat referenceBgr, Mat trimapMask, MattingMethod method, MattingSettings settings)
     {
         ArgumentNullException.ThrowIfNull(referenceBgr);
         ArgumentNullException.ThrowIfNull(trimapMask);
@@ -78,6 +78,7 @@ public sealed class PythonWorkerAlphaMatteEstimator : IAlphaMatteEstimator
                     ImagePath = imagePath,
                     TrimapPath = trimapPath,
                     OutputAlphaPath = outputAlphaPath,
+                    Method = method,
                     Settings = settings,
                 };
 
@@ -332,6 +333,8 @@ public sealed class PythonWorkerAlphaMatteEstimator : IAlphaMatteEstimator
         public string TrimapPath { get; set; } = string.Empty;
 
         public string OutputAlphaPath { get; set; } = string.Empty;
+
+        public MattingMethod Method { get; set; }
 
         public MattingSettings Settings { get; set; } = new();
     }

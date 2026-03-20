@@ -327,6 +327,7 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
                                     <TextBlock Grid.Row="0"
@@ -346,22 +347,37 @@
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
+                                               Text="輪郭設定方法" />
+                                    <ComboBox Grid.Row="1"
+                                              Grid.Column="1"
+                                              Margin="0,10,0,0"
+                                              ItemsSource="{Binding ContourSettingMethodOptions}"
+                                              DisplayMemberPath="Label"
+                                              SelectedValuePath="Value"
+                                              SelectedValue="{Binding SelectedContourSettingMethod}" />
+
+                                    <TextBlock Grid.Row="2"
+                                               Grid.Column="0"
+                                               Margin="0,10,10,0"
+                                               VerticalAlignment="Center"
+                                               Visibility="{Binding ContourToleranceVisibility}"
                                                Text="輪郭許容色差" />
-                                    <Slider Grid.Row="1"
+                                    <Slider Grid.Row="2"
                                             Grid.Column="1"
                                             Margin="0,10,0,0"
                                             Minimum="0"
                                             Maximum="1"
                                             TickFrequency="0.1"
                                             IsMoveToPointEnabled="True"
+                                            Visibility="{Binding ContourToleranceVisibility}"
                                             Value="{Binding ContourTolerance}" />
 
-                                    <TextBlock Grid.Row="2"
+                                    <TextBlock Grid.Row="3"
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
                                                Text="最大輪郭幅" />
-                                    <Slider Grid.Row="2"
+                                    <Slider Grid.Row="3"
                                             Grid.Column="1"
                                             Margin="0,10,0,0"
                                             Minimum="0"
@@ -370,12 +386,12 @@
                                             IsMoveToPointEnabled="True"
                                             Value="{Binding MaxContourWidth}" />
 
-                                    <TextBlock Grid.Row="3"
+                                    <TextBlock Grid.Row="4"
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
                                                Text="ノイズ軽減" />
-                                    <Slider Grid.Row="3"
+                                    <Slider Grid.Row="4"
                                             Grid.Column="1"
                                             Margin="0,10,0,0"
                                             Minimum="0"
@@ -384,12 +400,12 @@
                                             IsMoveToPointEnabled="True"
                                             Value="{Binding NoiseRemoval}" />
 
-                                    <TextBlock Grid.Row="4"
+                                    <TextBlock Grid.Row="5"
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
                                                Text="輪郭推測方法" />
-                                    <ComboBox Grid.Row="4"
+                                    <ComboBox Grid.Row="5"
                                               Grid.Column="1"
                                               Margin="0,10,0,0"
                                               ItemsSource="{Binding ContourInferenceMethodOptions}"
@@ -416,6 +432,11 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
                                     <TextBlock Grid.Row="0"
@@ -435,31 +456,107 @@
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
-                                               Text="輪郭補正強度" />
-                                    <Slider Grid.Row="1"
+                                               Text="色カブリ判定方法" />
+                                    <ComboBox Grid.Row="1"
+                                              Grid.Column="1"
+                                              Margin="0,10,0,0"
+                                              ItemsSource="{Binding DespillDetectionMethodOptions}"
+                                              DisplayMemberPath="Label"
+                                              SelectedValuePath="Value"
+                                              SelectedValue="{Binding SelectedDespillDetectionMethod}" />
+
+                                    <TextBlock Grid.Row="2"
+                                               Grid.Column="0"
+                                               Margin="0,10,10,0"
+                                               VerticalAlignment="Center"
+                                               Visibility="{Binding DespillDetectionWidthVisibility}"
+                                               Text="色カブリ判定幅" />
+                                    <Slider Grid.Row="2"
                                             Grid.Column="1"
                                             Margin="0,10,0,0"
                                             Minimum="0"
                                             Maximum="1"
                                             TickFrequency="0.1"
                                             IsMoveToPointEnabled="True"
-                                            Value="{Binding EdgeCorrectionStrength}" />
+                                            Visibility="{Binding DespillDetectionWidthVisibility}"
+                                            Value="{Binding DespillDetectionWidth}" />
 
-                                    <TextBlock Grid.Row="2"
+                                    <TextBlock Grid.Row="3"
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
+                                               Visibility="{Binding DespillDetectionStrengthVisibility}"
+                                               Text="色カブリ判定強度" />
+                                    <Slider Grid.Row="3"
+                                            Grid.Column="1"
+                                            Margin="0,10,0,0"
+                                            Minimum="0"
+                                            Maximum="1"
+                                            TickFrequency="0.1"
+                                            IsMoveToPointEnabled="True"
+                                            Visibility="{Binding DespillDetectionStrengthVisibility}"
+                                            Value="{Binding DespillDetectionStrength}" />
+
+                                    <TextBlock Grid.Row="4"
+                                               Grid.Column="0"
+                                               Margin="0,10,10,0"
+                                               VerticalAlignment="Center"
+                                               Text="色カブリ除去強度" />
+                                    <Slider Grid.Row="4"
+                                            Grid.Column="1"
+                                            Margin="0,10,0,0"
+                                            Minimum="0"
+                                            Maximum="1"
+                                            TickFrequency="0.1"
+                                            IsMoveToPointEnabled="True"
+                                            Value="{Binding DespillStrength}" />
+
+                                    <TextBlock Grid.Row="5"
+                                               Grid.Column="0"
+                                               Margin="0,10,10,0"
+                                               VerticalAlignment="Center"
+                                               Text="輪郭色補正" />
+                                    <CheckBox Grid.Row="5"
+                                              Grid.Column="1"
+                                              Margin="0,10,0,0"
+                                              Content="輪郭色補正を行う"
+                                              Foreground="#E8EEF5"
+                                              IsChecked="{Binding EnableEdgeColorCorrection}" />
+
+                                    <TextBlock Grid.Row="6"
+                                               Grid.Column="0"
+                                               Margin="0,10,10,0"
+                                               VerticalAlignment="Center"
+                                               IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
+                                               Text="輪郭色補正強度" />
+                                    <Slider Grid.Row="6"
+                                            Grid.Column="1"
+                                            Margin="0,10,0,0"
+                                            Minimum="0"
+                                            Maximum="1"
+                                            TickFrequency="0.1"
+                                            IsMoveToPointEnabled="True"
+                                            IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
+                                            Value="{Binding EdgeCorrectionStrength}" />
+
+                                    <TextBlock Grid.Row="7"
+                                               Grid.Column="0"
+                                               Margin="0,10,10,0"
+                                               VerticalAlignment="Center"
+                                               IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
                                                Text="輪郭代表色" />
-                                    <DockPanel Grid.Row="2"
+                                    <DockPanel Grid.Row="7"
                                                Grid.Column="1"
                                                Margin="0,10,0,8">
                                         <ToggleButton DockPanel.Dock="Right"
                                                       Margin="0,0,6,0"
+                                                      IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
                                                       IsChecked="{Binding IsLineColorEyedropperMode, Mode=OneWay}"
                                                       Click="LineEyedropperModeButton_OnClick">
                                             <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.DropperIcon}" />
                                         </ToggleButton>
                                         <Button DockPanel.Dock="Right"
+                                                IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
                                                 Click="LineColorPickerButton_OnClick">
                                             <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.PaletteIcon}" />
                                         </Button>
@@ -471,40 +568,13 @@
                                                 CornerRadius="2"
                                                 BorderBrush="#5A6570"
                                                 BorderThickness="1"
+                                                IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
                                                 Background="{Binding LineColorPreviewBrush}" />
                                         <TextBox Text="{Binding LineColorHex, UpdateSourceTrigger=PropertyChanged}"
+                                                 IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
                                                  Style="{StaticResource InputTextBoxStyle}" />
                                     </DockPanel>
                                 </Grid>
-                            </GroupBox>
-
-                            <GroupBox Style="{StaticResource PanelGroupBoxStyle}" Header="バッチ処理">
-                                <StackPanel Margin="8">
-                                    <Border x:Name="BatchDropZone"
-                                            AllowDrop="True"
-                                            Padding="12"
-                                            Background="#11161C"
-                                            BorderBrush="#44515E"
-                                            BorderThickness="1"
-                                            CornerRadius="6"
-                                            DragOver="BatchDropZone_OnDragOver"
-                                            Drop="BatchDropZone_OnDrop">
-                                        <StackPanel>
-                                            <TextBlock Foreground="#E8EEF5"
-                                                       FontWeight="SemiBold"
-                                                       Text="複数画像をここへドロップ" />
-                                            <TextBlock Margin="0,8,0,0"
-                                                       Foreground="#D4DCE4"
-                                                       Text="{Binding BatchStatusText}"
-                                                       TextWrapping="Wrap" />
-                                            <ProgressBar Margin="0,10,0,0"
-                                                         Height="14"
-                                                         Minimum="0"
-                                                         Maximum="100"
-                                                         Value="{Binding BatchProgressPercent, Mode=OneWay}" />
-                                        </StackPanel>
-                                    </Border>
-                                </StackPanel>
                             </GroupBox>
                         </StackPanel>
                     </ScrollViewer>
@@ -580,7 +650,17 @@
                                 </Grid>
                             </GroupBox>
 
-                            <GroupBox Style="{StaticResource PanelGroupBoxStyle}" Header="縁取り">
+                            <GroupBox Style="{StaticResource PanelGroupBoxStyle}">
+                                <GroupBox.Header>
+                                    <DockPanel LastChildFill="False">
+                                        <TextBlock VerticalAlignment="Center"
+                                                   Text="縁取り" />
+                                        <CheckBox Margin="10,0,0,0"
+                                                  VerticalAlignment="Center"
+                                                  Foreground="#E8EEF5"
+                                                  IsChecked="{Binding OutlineEnabled}" />
+                                    </DockPanel>
+                                </GroupBox.Header>
                                 <Grid Margin="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="110" />
@@ -589,75 +669,93 @@
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
                                     <TextBlock Grid.Row="0"
                                                Grid.Column="0"
                                                Margin="0,0,10,0"
                                                VerticalAlignment="Center"
-                                               Text="有効化" />
-                                    <CheckBox Grid.Row="0"
-                                              Grid.Column="1"
-                                              Content="縁取りを有効化"
-                                              Foreground="#E8EEF5"
-                                              IsChecked="{Binding OutlineEnabled}" />
+                                               Text="色 / 太さ" />
+                                    <Grid Grid.Row="0"
+                                          Grid.Column="1"
+                                          Margin="0,0,0,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="12" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
 
-                                    <TextBlock Grid.Row="1"
-                                               Grid.Column="0"
-                                               Margin="0,10,10,0"
-                                               VerticalAlignment="Center"
-                                               Text="色" />
-                                    <DockPanel Grid.Row="1"
-                                               Grid.Column="1"
-                                               Margin="0,10,0,8">
-                                        <ToggleButton DockPanel.Dock="Right"
-                                                      Margin="0,0,6,0"
-                                                      IsChecked="{Binding IsOutlineColorEyedropperMode, Mode=OneWay}"
-                                                      Click="OutlineEyedropperModeButton_OnClick">
-                                            <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.DropperIcon}" />
-                                        </ToggleButton>
-                                        <Button DockPanel.Dock="Right"
-                                                Click="OutlineColorPickerButton_OnClick">
-                                            <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.PaletteIcon}" />
-                                        </Button>
-                                        <Border DockPanel.Dock="Right"
-                                                Width="24"
-                                                Height="24"
-                                                Margin="0,0,6,0"
-                                                VerticalAlignment="Center"
-                                                CornerRadius="2"
-                                                BorderBrush="#5A6570"
-                                                BorderThickness="1"
-                                                Background="{Binding OutlineColorPreviewBrush}" />
-                                        <TextBox Text="{Binding OutlineColorHex, UpdateSourceTrigger=PropertyChanged}"
-                                                 Style="{StaticResource InputTextBoxStyle}" />
-                                    </DockPanel>
+                                        <DockPanel Grid.Column="0">
+                                            <ToggleButton DockPanel.Dock="Right"
+                                                          Margin="0,0,6,0"
+                                                          IsChecked="{Binding IsOutlineColorEyedropperMode, Mode=OneWay}"
+                                                          Click="OutlineEyedropperModeButton_OnClick">
+                                                <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.DropperIcon}" />
+                                            </ToggleButton>
+                                            <Button DockPanel.Dock="Right"
+                                                    Click="OutlineColorPickerButton_OnClick">
+                                                <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.PaletteIcon}" />
+                                            </Button>
+                                            <Border DockPanel.Dock="Right"
+                                                    Width="24"
+                                                    Height="24"
+                                                    Margin="0,0,6,0"
+                                                    VerticalAlignment="Center"
+                                                    CornerRadius="2"
+                                                    BorderBrush="#5A6570"
+                                                    BorderThickness="1"
+                                                    Background="{Binding OutlineColorPreviewBrush}" />
+                                            <TextBox Text="{Binding OutlineColorHex, UpdateSourceTrigger=PropertyChanged}"
+                                                     Style="{StaticResource InputTextBoxStyle}" />
+                                        </DockPanel>
 
-                                    <TextBlock Grid.Row="2"
-                                               Grid.Column="0"
-                                               Margin="0,10,10,0"
-                                               VerticalAlignment="Center"
-                                               Text="太さ" />
-                                    <DockPanel Grid.Row="2"
-                                               Grid.Column="1"
-                                               Margin="0,10,0,0"
-                                               LastChildFill="True">
-                                        <TextBox DockPanel.Dock="Right"
-                                                 Width="72"
-                                                 Margin="10,0,0,0"
-                                                 Text="{Binding OutlineThicknessText, Mode=OneWay}"
-                                                 Style="{StaticResource InputTextBoxStyle}"
-                                                 LostKeyboardFocus="OutlineThicknessTextBox_OnLostKeyboardFocus"
-                                                 PreviewKeyDown="OutlineThicknessTextBox_OnPreviewKeyDown" />
-                                        <Slider Minimum="0"
-                                                Maximum="100"
-                                                IsMoveToPointEnabled="True"
-                                                SmallChange="0.5"
-                                                LargeChange="2"
-                                                Value="{Binding OutlineThicknessSliderPosition}" />
-                                    </DockPanel>
+                                        <DockPanel Grid.Column="2"
+                                                   LastChildFill="True">
+                                            <TextBox DockPanel.Dock="Right"
+                                                     Width="72"
+                                                     Margin="10,0,0,0"
+                                                     Text="{Binding OutlineThicknessText, Mode=OneWay}"
+                                                     Style="{StaticResource InputTextBoxStyle}"
+                                                     LostKeyboardFocus="OutlineThicknessTextBox_OnLostKeyboardFocus"
+                                                     PreviewKeyDown="OutlineThicknessTextBox_OnPreviewKeyDown" />
+                                            <Slider Minimum="0"
+                                                    Maximum="100"
+                                                    IsMoveToPointEnabled="True"
+                                                    SmallChange="0.5"
+                                                    LargeChange="2"
+                                                    Value="{Binding OutlineThicknessSliderPosition}" />
+                                        </DockPanel>
+                                    </Grid>
                                 </Grid>
+                            </GroupBox>
+
+                            <GroupBox Style="{StaticResource PanelGroupBoxStyle}" Header="バッチ処理">
+                                <StackPanel Margin="8">
+                                    <Border x:Name="BatchDropZone"
+                                            AllowDrop="True"
+                                            Padding="12"
+                                            Background="#11161C"
+                                            BorderBrush="#44515E"
+                                            BorderThickness="1"
+                                            CornerRadius="6"
+                                            DragOver="BatchDropZone_OnDragOver"
+                                            Drop="BatchDropZone_OnDrop">
+                                        <StackPanel>
+                                            <TextBlock Foreground="#E8EEF5"
+                                                       FontWeight="SemiBold"
+                                                       Text="複数画像をここへドロップ" />
+                                            <TextBlock Margin="0,8,0,0"
+                                                       Foreground="#D4DCE4"
+                                                       Text="{Binding BatchStatusText}"
+                                                       TextWrapping="Wrap" />
+                                            <ProgressBar Margin="0,10,0,0"
+                                                         Height="14"
+                                                         Minimum="0"
+                                                         Maximum="100"
+                                                         Value="{Binding BatchProgressPercent, Mode=OneWay}" />
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
                             </GroupBox>
                         </StackPanel>
                     </ScrollViewer>
