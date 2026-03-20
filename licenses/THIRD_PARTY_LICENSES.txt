@@ -1,0 +1,30 @@
+This directory contains third-party license texts bundled with Kirinico.
+
+Included runtime dependencies and related assets:
+
+- CPython 3.12.10
+  - File: python/CPython-LICENSE.txt
+- PyMatting 1.1.15
+  - File: python/pymatting-LICENSE.md
+- NumPy 2.4.3
+  - Directory: python/numpy-licenses/
+- SciPy 1.17.1
+  - File: python/scipy-LICENSE.txt
+- Numba 0.64.0
+  - Files:
+    - python/numba-LICENSE
+    - python/numba-LICENSES.third-party
+- llvmlite 0.46.0
+  - Files:
+    - python/llvmlite-LICENSE
+    - python/llvmlite-LICENSE.thirdparty
+- Pillow 12.1.1
+  - File: python/pillow-LICENSE
+- CommunityToolkit.Mvvm 8.4.0
+  - File: dotnet/CommunityToolkit.Mvvm-MIT.txt
+- OpenCvSharp4 4.13.0.20260308
+  - File: dotnet/OpenCvSharp4-APACHE-2.0.txt
+- OpenCvSharp4.runtime.win 4.13.0.20260302
+  - File: dotnet/OpenCvSharp4.runtime.win-APACHE-2.0.txt
+- Material Symbols & Icons
+  - File: assets/Material-Symbols-APACHE-2.0.txt
