@@ -33,19 +33,13 @@ public sealed class AppSettingsSnapshot
 
         public double TransparencyCut { get; set; } = 0.15d;
 
-        public DespillDetectionMethod DespillDetectionMethod { get; set; } = DespillDetectionMethod.AlphaBand;
+        public double OpaqueAlphaThreshold { get; set; } = 0.75d;
 
-        public double DespillDetectionStrength { get; set; } = 0.6d;
+        public double DespillExpansion { get; set; } = 0.2d;
 
-        public double DespillDetectionWidth { get; set; } = 0.3d;
+        public double DespillMix { get; set; } = 0.5d;
 
-        public double DespillStrength { get; set; } = 1.0d;
-
-        public bool EnableEdgeColorCorrection { get; set; } = true;
-
-        public double EdgeCorrectionStrength { get; set; } = 0.5d;
-
-        public string? EdgeRepresentativeColorHex { get; set; }
+        public double DespillBrightness { get; set; } = 0.5d;
 
         public bool AutoReprocess { get; set; } = true;
 

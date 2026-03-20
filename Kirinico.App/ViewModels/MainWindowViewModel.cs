@@ -72,13 +72,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _maxContourWidth = 0.1d;
     private MattingMethod _selectedContourInferenceMethod = MattingMethod.Cf;
     private double _transparencyCut = 0.15d;
-    private DespillDetectionMethod _selectedDespillDetectionMethod = DespillDetectionMethod.AlphaBand;
-    private double _despillDetectionStrength = 0.6d;
-    private double _despillDetectionWidth = 0.3d;
-    private double _despillStrength = 1.0d;
-    private bool _enableEdgeColorCorrection = true;
-    private double _edgeCorrectionStrength = 0.5d;
-    private string _lineColorHex = string.Empty;
+    private double _opaqueAlphaThreshold = 0.75d;
+    private double _despillExpansion = 0.2d;
+    private double _despillMix = 0.5d;
+    private double _despillBrightness = 0.5d;
     private double _scalePercent = 100d;
     private ResizeInterpolationMode _selectedResizeInterpolation = ResizeInterpolationMode.Lanczos4;
     private int _outputWidth;
@@ -161,12 +158,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     [
         new SelectionOption<ContourSettingMethod>(ContourSettingMethod.Width, "幅"),
         new SelectionOption<ContourSettingMethod>(ContourSettingMethod.ColorDifference, "色差"),
-    ];
-
-    public IReadOnlyList<SelectionOption<DespillDetectionMethod>> DespillDetectionMethodOptions { get; } =
-    [
-        new SelectionOption<DespillDetectionMethod>(DespillDetectionMethod.AlphaBand, "透明帯"),
-        new SelectionOption<DespillDetectionMethod>(DespillDetectionMethod.Width, "幅"),
     ];
 
     public ViewportState SharedViewport { get; } = new();
@@ -467,103 +458,53 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    public DespillDetectionMethod SelectedDespillDetectionMethod
+    public double DespillExpansion
     {
-        get => _selectedDespillDetectionMethod;
-        set
-        {
-            if (SetProperty(ref _selectedDespillDetectionMethod, value))
-            {
-                OnPropertyChanged(nameof(DespillDetectionStrengthVisibility));
-                OnPropertyChanged(nameof(DespillDetectionWidthVisibility));
-                MarkPreviewDirty(PreviewDirtyKind.Presentation);
-            }
-        }
-    }
-
-    public Visibility DespillDetectionStrengthVisibility => SelectedDespillDetectionMethod == DespillDetectionMethod.Width
-        ? Visibility.Collapsed
-        : Visibility.Visible;
-
-    public Visibility DespillDetectionWidthVisibility => SelectedDespillDetectionMethod == DespillDetectionMethod.Width
-        ? Visibility.Visible
-        : Visibility.Collapsed;
-
-    public double DespillDetectionStrength
-    {
-        get => _despillDetectionStrength;
+        get => _despillExpansion;
         set
         {
             var sanitized = Math.Clamp(value, 0d, 1d);
-            if (SetProperty(ref _despillDetectionStrength, sanitized))
+            if (SetProperty(ref _despillExpansion, sanitized))
             {
                 MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
 
-    public double DespillDetectionWidth
+    public double OpaqueAlphaThreshold
     {
-        get => _despillDetectionWidth;
+        get => _opaqueAlphaThreshold;
         set
         {
             var sanitized = Math.Clamp(value, 0d, 1d);
-            if (SetProperty(ref _despillDetectionWidth, sanitized))
+            if (SetProperty(ref _opaqueAlphaThreshold, sanitized))
             {
                 MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
 
-    public double DespillStrength
+    public double DespillMix
     {
-        get => _despillStrength;
+        get => _despillMix;
         set
         {
             var sanitized = Math.Clamp(value, 0d, 1d);
-            if (SetProperty(ref _despillStrength, sanitized))
+            if (SetProperty(ref _despillMix, sanitized))
             {
                 MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
     }
 
-    public bool EnableEdgeColorCorrection
+    public double DespillBrightness
     {
-        get => _enableEdgeColorCorrection;
-        set
-        {
-            if (SetProperty(ref _enableEdgeColorCorrection, value))
-            {
-                OnPropertyChanged(nameof(AreEdgeCorrectionControlsEnabled));
-                MarkPreviewDirty(PreviewDirtyKind.Presentation);
-            }
-        }
-    }
-
-    public bool AreEdgeCorrectionControlsEnabled => EnableEdgeColorCorrection;
-
-    public double EdgeCorrectionStrength
-    {
-        get => _edgeCorrectionStrength;
+        get => _despillBrightness;
         set
         {
             var sanitized = Math.Clamp(value, 0d, 1d);
-            if (SetProperty(ref _edgeCorrectionStrength, sanitized))
+            if (SetProperty(ref _despillBrightness, sanitized))
             {
-                MarkPreviewDirty(PreviewDirtyKind.Presentation);
-            }
-        }
-    }
-
-    public string LineColorHex
-    {
-        get => _lineColorHex;
-        set
-        {
-            if (SetProperty(ref _lineColorHex, value))
-            {
-                OnPropertyChanged(nameof(LineColorPreviewBrush));
                 MarkPreviewDirty(PreviewDirtyKind.Presentation);
             }
         }
@@ -736,7 +677,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(IsEyedropperMode));
                 OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
                 OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
-                OnPropertyChanged(nameof(IsLineColorEyedropperMode));
                 OnPropertyChanged(nameof(EditableViewerCursor));
                 OnPropertyChanged(nameof(ResultViewerCursor));
                 OnPropertyChanged(nameof(EditableViewerPansWithLeftButton));
@@ -755,11 +695,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public bool IsBackgroundColorEyedropperMode => IsEyedropperMode && _activeColorPickTarget == ColorPickTarget.Background;
 
-    public bool IsLineColorEyedropperMode => IsEyedropperMode && _activeColorPickTarget == ColorPickTarget.Line;
-
     public Brush BackgroundColorPreviewBrush => CreatePreviewBrush(ColorPickTarget.Background, BackgroundColorHex);
-
-    public Brush LineColorPreviewBrush => CreatePreviewBrush(ColorPickTarget.Line, LineColorHex);
 
     public Brush OutlineColorPreviewBrush => CreatePreviewBrush(ColorPickTarget.Outline, OutlineColorHex);
 
@@ -921,6 +857,27 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         });
     }
 
+    public async Task SaveRawAlphaMaskAsync(string path)
+    {
+        var alphaMask = _latestResult?.AlphaMask ?? _cachedPreResizeResult?.AlphaMask;
+        if (alphaMask is null)
+        {
+            throw new InvalidOperationException("保存できる A_raw がありません。");
+        }
+
+        using var saveMat = alphaMask.Clone();
+        await Task.Run(() =>
+        {
+            if (!Cv2.ImWrite(path, saveMat))
+            {
+                throw new InvalidOperationException("A_raw を保存できませんでした。");
+            }
+        });
+
+        _statusText = $"A_raw を保存しました: {path}";
+        OnPropertyChanged(nameof(StatusText));
+    }
+
     public void Reprocess()
     {
         if (_sourceImage is null)
@@ -1002,7 +959,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ClearEyedropperPreview();
         OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
         OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
-        OnPropertyChanged(nameof(IsLineColorEyedropperMode));
         UpdateModeState(EditorMode.Eyedropper);
     }
 
@@ -1012,17 +968,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         ClearEyedropperPreview();
         OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
         OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
-        OnPropertyChanged(nameof(IsLineColorEyedropperMode));
-        UpdateModeState(EditorMode.Eyedropper);
-    }
-
-    public void BeginLineColorPick()
-    {
-        _activeColorPickTarget = ColorPickTarget.Line;
-        ClearEyedropperPreview();
-        OnPropertyChanged(nameof(IsOutlineColorEyedropperMode));
-        OnPropertyChanged(nameof(IsBackgroundColorEyedropperMode));
-        OnPropertyChanged(nameof(IsLineColorEyedropperMode));
         UpdateModeState(EditorMode.Eyedropper);
     }
 
@@ -1409,10 +1354,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 BackgroundColorHex = color.ToHex();
                 statusText = $"背景色を取得しました: {BackgroundColorHex}";
                 break;
-            case ColorPickTarget.Line:
-                LineColorHex = color.ToHex();
-                statusText = $"主線色を取得しました: {LineColorHex}";
-                break;
             default:
                 OutlineColorHex = color.ToHex();
                 statusText = $"縁取り色を取得しました: {OutlineColorHex}";
@@ -1566,13 +1507,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ContourInferenceMethod = SelectedContourInferenceMethod,
             BackgroundSeeds = CollectSeedSnapshots(),
             TransparencyCut = TransparencyCut,
-            DespillDetectionMethod = SelectedDespillDetectionMethod,
-            DespillDetectionStrength = DespillDetectionStrength,
-            DespillDetectionWidth = DespillDetectionWidth,
-            DespillStrength = DespillStrength,
-            EnableEdgeColorCorrection = EnableEdgeColorCorrection,
-            EdgeCorrectionStrength = EdgeCorrectionStrength,
-            EdgeRepresentativeColorHex = string.IsNullOrWhiteSpace(LineColorHex) ? null : LineColorHex,
+            OpaqueAlphaThreshold = OpaqueAlphaThreshold,
+            DespillExpansion = DespillExpansion,
+            DespillMix = DespillMix,
+            DespillBrightness = DespillBrightness,
             AutoReprocess = AutoReprocess,
             ResizeInterpolation = SelectedResizeInterpolation,
             ScalePercent = ScalePercent,
@@ -1582,7 +1520,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             OutlineColorHex = OutlineColorHex,
             OutlineThickness = OutlineThickness,
         },
-        Internal = _internalSettings,
+        Internal = CloneInternalSettings(_internalSettings),
     };
 
     private void ResetUiParametersForLoadedImage(string backgroundColorHex)
@@ -1600,13 +1538,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             MaxContourWidth = defaults.MaxContourWidth;
             SelectedContourInferenceMethod = defaults.ContourInferenceMethod;
             TransparencyCut = defaults.TransparencyCut;
-            SelectedDespillDetectionMethod = defaults.DespillDetectionMethod;
-            DespillDetectionStrength = defaults.DespillDetectionStrength;
-            DespillDetectionWidth = defaults.DespillDetectionWidth;
-            DespillStrength = defaults.DespillStrength;
-            EnableEdgeColorCorrection = defaults.EnableEdgeColorCorrection;
-            EdgeCorrectionStrength = defaults.EdgeCorrectionStrength;
-            LineColorHex = defaults.EdgeRepresentativeColorHex ?? string.Empty;
+            OpaqueAlphaThreshold = defaults.OpaqueAlphaThreshold;
+            DespillExpansion = defaults.DespillExpansion;
+            DespillMix = defaults.DespillMix;
+            DespillBrightness = defaults.DespillBrightness;
             AutoReprocess = defaults.AutoReprocess;
             SelectedResizeInterpolation = defaults.ResizeInterpolation;
             OutlineEnabled = defaults.OutlineEnabled;
@@ -1648,13 +1583,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             MaxContourWidth = ui.MaxContourWidth;
             SelectedContourInferenceMethod = ui.ContourInferenceMethod;
             TransparencyCut = ui.TransparencyCut;
-            SelectedDespillDetectionMethod = ui.DespillDetectionMethod;
-            DespillDetectionStrength = ui.DespillDetectionStrength;
-            DespillDetectionWidth = ui.DespillDetectionWidth;
-            DespillStrength = ui.DespillStrength;
-            EnableEdgeColorCorrection = ui.EnableEdgeColorCorrection;
-            EdgeCorrectionStrength = ui.EdgeCorrectionStrength;
-            LineColorHex = ui.EdgeRepresentativeColorHex ?? string.Empty;
+            OpaqueAlphaThreshold = ui.OpaqueAlphaThreshold;
+            DespillExpansion = ui.DespillExpansion;
+            DespillMix = ui.DespillMix;
+            DespillBrightness = ui.DespillBrightness;
             ScalePercent = ui.ScalePercent;
             SelectedResizeInterpolation = ui.ResizeInterpolation;
             OutputWidth = Math.Max(1, ui.OutputWidth);
@@ -1733,7 +1665,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _internalSettings.Matting.Lkm.Radius = source.Matting.Lkm.Radius;
 
         _internalSettings.BackgroundThreshold.TbgMin = source.BackgroundThreshold.TbgMin;
-        _internalSettings.BackgroundThreshold.DistanceFromBackgroundOnly = source.BackgroundThreshold.DistanceFromBackgroundOnly;
         _internalSettings.BackgroundThreshold.TbgMax = source.BackgroundThreshold.TbgMax;
         _internalSettings.BackgroundThreshold.TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin;
         _internalSettings.BackgroundThreshold.TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax;
@@ -1747,19 +1678,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         _internalSettings.AlphaColorRestore.AlphaCutMin = source.AlphaColorRestore.AlphaCutMin;
         _internalSettings.AlphaColorRestore.AlphaCutMax = source.AlphaColorRestore.AlphaCutMax;
-        _internalSettings.AlphaColorRestore.MidAlphaUpperMin = source.AlphaColorRestore.MidAlphaUpperMin;
-        _internalSettings.AlphaColorRestore.MidAlphaUpperMax = source.AlphaColorRestore.MidAlphaUpperMax;
-        _internalSettings.AlphaColorRestore.EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin;
-        _internalSettings.AlphaColorRestore.EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax;
-        _internalSettings.AlphaColorRestore.DespillStrength = source.AlphaColorRestore.DespillStrength;
-        _internalSettings.AlphaColorRestore.DespillOnlyOnPartialAlpha = source.AlphaColorRestore.DespillOnlyOnPartialAlpha;
-        _internalSettings.AlphaColorRestore.EdgeColorCorrectionAlphaMax = source.AlphaColorRestore.EdgeColorCorrectionAlphaMax;
-        _internalSettings.AlphaColorRestore.EdgeColorCorrectionBgDistance = source.AlphaColorRestore.EdgeColorCorrectionBgDistance;
-        _internalSettings.AlphaColorRestore.EdgeColorCorrectionAlphaMin = source.AlphaColorRestore.EdgeColorCorrectionAlphaMin;
-        _internalSettings.AlphaColorRestore.EdgeColorCorrectionAlphaPeak = source.AlphaColorRestore.EdgeColorCorrectionAlphaPeak;
-        _internalSettings.AlphaColorRestore.RestoreComplementProjectionMax = source.AlphaColorRestore.RestoreComplementProjectionMax;
-        _internalSettings.AlphaColorRestore.RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon;
-        _internalSettings.AlphaColorRestore.UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided;
+        _internalSettings.AlphaColorRestore.DespillExpand = source.AlphaColorRestore.DespillExpand;
     }
 
     private List<AppSettingsSnapshot.SeedPointSnapshot> CollectSeedSnapshots()
@@ -2122,9 +2041,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ? parsedOutline
             : new RgbColor(0, 0, 0);
         var internalSettings = CloneInternalSettings(_internalSettings);
-        internalSettings.BackgroundThreshold.DistanceFromBackgroundOnly = SelectedContourSettingMethod == ContourSettingMethod.Width;
-        internalSettings.AlphaColorRestore.DespillOnlyOnPartialAlpha = SelectedDespillDetectionMethod == DespillDetectionMethod.AlphaBand;
-        internalSettings.AlphaColorRestore.DespillStrength = DespillStrength;
 
         return new CutoutParameters
         {
@@ -2135,16 +2051,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             BackgroundTolerance = BackgroundTolerance,
             DenoiseStrength = NoiseRemoval,
             ContourTolerance = ContourTolerance,
+            DistanceFromBackgroundOnly = SelectedContourSettingMethod == ContourSettingMethod.Width,
             MaxContourWidthPx = (int)Math.Round(MaxContourWidth * 128d),
             MattingMethod = SelectedContourInferenceMethod,
             TransparencyCut = TransparencyCut,
-            DespillDetectionStrength = DespillDetectionStrength,
-            DespillDetectionWidthPx = (int)Math.Round(DespillDetectionWidth * 10d),
-            EnableEdgeColorCorrection = EnableEdgeColorCorrection,
-            EdgeCorrectionStrength = EdgeCorrectionStrength,
-            EdgeRepresentativeColor = RgbColor.TryParseHex(LineColorHex, out var parsedLineColor)
-                ? parsedLineColor
-                : null,
+            OpaqueAlphaThreshold = ConvertUiOpaqueAlphaThresholdToInternal(OpaqueAlphaThreshold),
+            DespillExpansionPx = (int)Math.Round(DespillExpansion * 5d),
+            DespillMix = DespillMix,
+            DespillExpand = internalSettings.AlphaColorRestore.DespillExpand,
+            DespillBrightness = ConvertUiBrightnessToInternal(DespillBrightness),
             Resize = new ResizeOptions
             {
                 Mode = ResizeMode.Scale,
@@ -2202,7 +2117,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             },
                 BackgroundThreshold = new BackgroundThresholdSettings
                 {
-                    DistanceFromBackgroundOnly = source.BackgroundThreshold.DistanceFromBackgroundOnly,
                     TbgMin = source.BackgroundThreshold.TbgMin,
                 TbgMax = source.BackgroundThreshold.TbgMax,
                 TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin,
@@ -2221,19 +2135,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 AlphaCutMin = source.AlphaColorRestore.AlphaCutMin,
                 AlphaCutMax = source.AlphaColorRestore.AlphaCutMax,
-                MidAlphaUpperMin = source.AlphaColorRestore.MidAlphaUpperMin,
-                MidAlphaUpperMax = source.AlphaColorRestore.MidAlphaUpperMax,
-                EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin,
-                EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax,
-                DespillStrength = source.AlphaColorRestore.DespillStrength,
-                DespillOnlyOnPartialAlpha = source.AlphaColorRestore.DespillOnlyOnPartialAlpha,
-                EdgeColorCorrectionAlphaMax = source.AlphaColorRestore.EdgeColorCorrectionAlphaMax,
-                EdgeColorCorrectionBgDistance = source.AlphaColorRestore.EdgeColorCorrectionBgDistance,
-                EdgeColorCorrectionAlphaMin = source.AlphaColorRestore.EdgeColorCorrectionAlphaMin,
-                EdgeColorCorrectionAlphaPeak = source.AlphaColorRestore.EdgeColorCorrectionAlphaPeak,
-                RestoreComplementProjectionMax = source.AlphaColorRestore.RestoreComplementProjectionMax,
-                RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon,
-                UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided,
+                DespillExpand = source.AlphaColorRestore.DespillExpand,
             },
         };
     }
@@ -2260,7 +2162,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         return _activeColorPickTarget switch
         {
             ColorPickTarget.Background => "元画像または結果画像をクリックして背景色を取得します。",
-            ColorPickTarget.Line => "元画像または結果画像をクリックして主線色を取得します。",
             _ => "元画像または結果画像をクリックして縁取り色を取得します。",
         };
     }
@@ -2394,7 +2295,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private void NotifyColorPreviewBrushesChanged()
     {
         OnPropertyChanged(nameof(BackgroundColorPreviewBrush));
-        OnPropertyChanged(nameof(LineColorPreviewBrush));
         OnPropertyChanged(nameof(OutlineColorPreviewBrush));
     }
 
@@ -2461,6 +2361,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         return Math.Log(thickness + 1d, 101d) * 100d;
     }
+
+    private static double ConvertUiBrightnessToInternal(double uiValue)
+        => (Math.Clamp(uiValue, 0d, 1d) * 20d) - 10d;
+
+    private static double ConvertInternalBrightnessToUi(double internalValue)
+        => Math.Clamp((internalValue + 10d) / 20d, 0d, 1d);
+
+    private static double ConvertUiOpaqueAlphaThresholdToInternal(double uiValue)
+        => 0.8d + (Math.Clamp(uiValue, 0d, 1d) * 0.2d);
 
     private static BitmapSource CreateSeedPreviewBitmap(Mat sourceImage, int x, int y)
     {

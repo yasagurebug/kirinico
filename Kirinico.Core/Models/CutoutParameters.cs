@@ -10,6 +10,8 @@ public sealed class CutoutParameters
 
     public double ContourTolerance { get; set; } = 0.4d;
 
+    public bool DistanceFromBackgroundOnly { get; set; }
+
     public int MaxContourWidthPx { get; set; } = 32;
 
     public double DenoiseStrength { get; set; } = 0.3d;
@@ -18,15 +20,15 @@ public sealed class CutoutParameters
 
     public double TransparencyCut { get; set; } = 0.15d;
 
-    public double DespillDetectionStrength { get; set; } = 1.0d;
+    public double OpaqueAlphaThreshold { get; set; } = 0.95d;
 
-    public int DespillDetectionWidthPx { get; set; } = 3;
+    public int DespillExpansionPx { get; set; } = 1;
 
-    public double EdgeCorrectionStrength { get; set; } = 0.5d;
+    public double DespillMix { get; set; } = 0.5d;
 
-    public bool EnableEdgeColorCorrection { get; set; } = true;
+    public double DespillExpand { get; set; }
 
-    public RgbColor? EdgeRepresentativeColor { get; set; }
+    public double DespillBrightness { get; set; }
 
     public ResizeOptions Resize { get; set; } = new();
 

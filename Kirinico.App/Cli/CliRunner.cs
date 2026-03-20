@@ -107,9 +107,6 @@ internal static class CliRunner
         var ui = snapshot.Ui ?? new AppSettingsSnapshot.UiSettingsSnapshot();
         var outlineColor = ParseRequiredColor(ui.OutlineColorHex, new RgbColor(0, 0, 0));
         var internalSettings = CloneInternalSettings(snapshot.Internal ?? new InternalSettings());
-        internalSettings.BackgroundThreshold.DistanceFromBackgroundOnly = ui.ContourSettingMethod == ContourSettingMethod.Width;
-        internalSettings.AlphaColorRestore.DespillOnlyOnPartialAlpha = ui.DespillDetectionMethod == DespillDetectionMethod.AlphaBand;
-        internalSettings.AlphaColorRestore.DespillStrength = ui.DespillStrength;
 
         return new CutoutParameters
         {
@@ -117,15 +114,16 @@ internal static class CliRunner
             BackgroundColor = ParseRequiredColor(ui.BackgroundColorHex, new RgbColor(255, 255, 255)),
             BackgroundTolerance = ui.BackgroundTolerance,
             ContourTolerance = ui.ContourTolerance,
+            DistanceFromBackgroundOnly = ui.ContourSettingMethod == ContourSettingMethod.Width,
             MaxContourWidthPx = (int)Math.Round(Math.Clamp(ui.MaxContourWidth, 0d, 1d) * 128d),
             DenoiseStrength = ui.DenoiseStrength,
             MattingMethod = ui.ContourInferenceMethod,
             TransparencyCut = ui.TransparencyCut,
-            DespillDetectionStrength = ui.DespillDetectionStrength,
-            DespillDetectionWidthPx = (int)Math.Round(Math.Clamp(ui.DespillDetectionWidth, 0d, 1d) * 10d),
-            EnableEdgeColorCorrection = ui.EnableEdgeColorCorrection,
-            EdgeCorrectionStrength = ui.EdgeCorrectionStrength,
-            EdgeRepresentativeColor = ParseOptionalColor(ui.EdgeRepresentativeColorHex),
+            OpaqueAlphaThreshold = ConvertUiOpaqueAlphaThresholdToInternal(ui.OpaqueAlphaThreshold),
+            DespillExpansionPx = (int)Math.Round(Math.Clamp(ui.DespillExpansion, 0d, 1d) * 5d),
+            DespillMix = Math.Clamp(ui.DespillMix, 0d, 1d),
+            DespillExpand = Math.Clamp(internalSettings.AlphaColorRestore.DespillExpand, 0d, 1d),
+            DespillBrightness = ConvertUiBrightnessToInternal(ui.DespillBrightness),
             Resize = new ResizeOptions
             {
                 Mode = ResizeMode.Scale,
@@ -188,7 +186,6 @@ internal static class CliRunner
                 TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax,
                 BgNoiseMinArea = source.BackgroundThreshold.BgNoiseMinArea,
                 BgNoiseMaxHoleArea = source.BackgroundThreshold.BgNoiseMaxHoleArea,
-                DistanceFromBackgroundOnly = source.BackgroundThreshold.DistanceFromBackgroundOnly,
             },
             Preprocess = new PreprocessSettings
             {
@@ -201,19 +198,7 @@ internal static class CliRunner
             {
                 AlphaCutMin = source.AlphaColorRestore.AlphaCutMin,
                 AlphaCutMax = source.AlphaColorRestore.AlphaCutMax,
-                MidAlphaUpperMin = source.AlphaColorRestore.MidAlphaUpperMin,
-                MidAlphaUpperMax = source.AlphaColorRestore.MidAlphaUpperMax,
-                EdgeConstraintMin = source.AlphaColorRestore.EdgeConstraintMin,
-                EdgeConstraintMax = source.AlphaColorRestore.EdgeConstraintMax,
-                DespillStrength = source.AlphaColorRestore.DespillStrength,
-                DespillOnlyOnPartialAlpha = source.AlphaColorRestore.DespillOnlyOnPartialAlpha,
-                EdgeColorCorrectionAlphaMax = source.AlphaColorRestore.EdgeColorCorrectionAlphaMax,
-                EdgeColorCorrectionBgDistance = source.AlphaColorRestore.EdgeColorCorrectionBgDistance,
-                EdgeColorCorrectionAlphaMin = source.AlphaColorRestore.EdgeColorCorrectionAlphaMin,
-                EdgeColorCorrectionAlphaPeak = source.AlphaColorRestore.EdgeColorCorrectionAlphaPeak,
-                RestoreComplementProjectionMax = source.AlphaColorRestore.RestoreComplementProjectionMax,
-                RestoreEpsilon = source.AlphaColorRestore.RestoreEpsilon,
-                UseEdgeColorOnlyIfProvided = source.AlphaColorRestore.UseEdgeColorOnlyIfProvided,
+                DespillExpand = source.AlphaColorRestore.DespillExpand,
             },
         };
 
@@ -249,6 +234,12 @@ internal static class CliRunner
 
     private static RgbColor? ParseOptionalColor(string? hex)
         => RgbColor.TryParseHex(hex, out var color) ? color : null;
+
+    private static double ConvertUiBrightnessToInternal(double uiValue)
+        => (Math.Clamp(uiValue, 0d, 1d) * 20d) - 10d;
+
+    private static double ConvertUiOpaqueAlphaThresholdToInternal(double uiValue)
+        => 0.8d + (Math.Clamp(uiValue, 0d, 1d) * 0.2d);
 
     private static void WriteUsage()
     {

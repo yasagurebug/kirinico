@@ -80,8 +80,6 @@ public sealed class LkmMattingSettings
 
 public sealed class BackgroundThresholdSettings
 {
-    public bool DistanceFromBackgroundOnly { get; set; }
-
     public double TbgMin { get; set; } = 2d;
 
     public double TbgMax { get; set; } = 64d;
@@ -112,29 +110,5 @@ public sealed class AlphaColorRestoreSettings
 
     public double AlphaCutMax { get; set; } = 0.99d;
 
-    public double MidAlphaUpperMin { get; set; } = 0.45d;
-
-    public double MidAlphaUpperMax { get; set; } = 0.75d;
-
-    public double EdgeConstraintMin { get; set; } = 0d;
-
-    public double EdgeConstraintMax { get; set; } = 1d;
-
-    public double DespillStrength { get; set; } = 1d;
-
-    public bool DespillOnlyOnPartialAlpha { get; set; }
-
-    public double EdgeColorCorrectionAlphaMax { get; set; } = 0.98d;
-
-    public double EdgeColorCorrectionBgDistance { get; set; } = 48d;
-
-    public double EdgeColorCorrectionAlphaMin { get; set; } = 0.15d;
-
-    public double EdgeColorCorrectionAlphaPeak { get; set; } = 0.6d;
-
-    public double RestoreComplementProjectionMax { get; set; } = 0.15d;
-
-    public double RestoreEpsilon { get; set; } = 0.02d;
-
-    public bool UseEdgeColorOnlyIfProvided { get; set; } = true;
+    public double DespillExpand { get; set; }
 }

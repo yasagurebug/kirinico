@@ -97,6 +97,42 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void SaveRawAlphaButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        var defaultName = string.IsNullOrWhiteSpace(_viewModel.CurrentFilePath) || _viewModel.CurrentFilePath == "画像未選択"
+            ? "alpha_raw.png"
+            : $"{System.IO.Path.GetFileNameWithoutExtension(_viewModel.CurrentFilePath)}_alpha_raw.png";
+
+        var dialog = new SaveFileDialog
+        {
+            Filter = "PNG 画像|*.png",
+            FileName = defaultName,
+        };
+
+        if (!string.IsNullOrWhiteSpace(_viewModel.CurrentFilePath) && _viewModel.CurrentFilePath != "画像未選択")
+        {
+            var sourceDirectory = System.IO.Path.GetDirectoryName(_viewModel.CurrentFilePath);
+            if (!string.IsNullOrWhiteSpace(sourceDirectory))
+            {
+                dialog.InitialDirectory = sourceDirectory;
+            }
+        }
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await _viewModel.SaveRawAlphaMaskAsync(dialog.FileName);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "A_raw 保存", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void ReprocessButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.Reprocess();
 
     private async void ExportSettingsButton_OnClick(object sender, RoutedEventArgs e)
@@ -162,8 +198,6 @@ public partial class MainWindow : Window
 
     private void BackgroundEyedropperModeButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.BeginBackgroundColorPick();
 
-    private void LineEyedropperModeButton_OnClick(object sender, RoutedEventArgs e) => _viewModel.BeginLineColorPick();
-
     private void WandRemoveModeButton_OnClick(object sender, RoutedEventArgs e)
     {
         var window = new SeedManagerWindow(_viewModel.BuildSeedPreviewItems(), _viewModel.DeleteSeed)
@@ -215,14 +249,6 @@ public partial class MainWindow : Window
         if (TryPickColor(out var color))
         {
             _viewModel.BackgroundColorHex = $"{color.R:X2}{color.G:X2}{color.B:X2}";
-        }
-    }
-
-    private void LineColorPickerButton_OnClick(object sender, RoutedEventArgs e)
-    {
-        if (TryPickColor(out var color))
-        {
-            _viewModel.LineColorHex = $"{color.R:X2}{color.G:X2}{color.B:X2}";
         }
     }
 

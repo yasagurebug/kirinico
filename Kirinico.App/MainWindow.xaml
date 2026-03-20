@@ -155,6 +155,13 @@
                             <TextBlock Margin="8,0,0,0" VerticalAlignment="Center" Text="設定インポート" />
                         </StackPanel>
                     </Button>
+
+                    <Button Style="{StaticResource ToolbarButtonStyle}" Margin="18,0,8,0" Click="SaveRawAlphaButton_OnClick">
+                        <StackPanel Orientation="Horizontal">
+                            <Image Width="20" Height="20" VerticalAlignment="Center" Source="{x:Static services:ToolbarIconService.SaveIcon}" />
+                            <TextBlock Margin="8,0,0,0" VerticalAlignment="Center" Text="A_raw保存" />
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -434,9 +441,6 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
                                     <TextBlock Grid.Row="0"
@@ -456,21 +460,21 @@
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
-                                               Text="色カブリ判定方法" />
-                                    <ComboBox Grid.Row="1"
-                                              Grid.Column="1"
-                                              Margin="0,10,0,0"
-                                              ItemsSource="{Binding DespillDetectionMethodOptions}"
-                                              DisplayMemberPath="Label"
-                                              SelectedValuePath="Value"
-                                              SelectedValue="{Binding SelectedDespillDetectionMethod}" />
+                                               Text="透明部切り上げ" />
+                                    <Slider Grid.Row="1"
+                                            Grid.Column="1"
+                                            Margin="0,10,0,0"
+                                            Minimum="0"
+                                            Maximum="1"
+                                            TickFrequency="0.1"
+                                            IsMoveToPointEnabled="True"
+                                            Value="{Binding OpaqueAlphaThreshold}" />
 
                                     <TextBlock Grid.Row="2"
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
-                                               Visibility="{Binding DespillDetectionWidthVisibility}"
-                                               Text="色カブリ判定幅" />
+                                               Text="輪郭拡張" />
                                     <Slider Grid.Row="2"
                                             Grid.Column="1"
                                             Margin="0,10,0,0"
@@ -478,15 +482,13 @@
                                             Maximum="1"
                                             TickFrequency="0.1"
                                             IsMoveToPointEnabled="True"
-                                            Visibility="{Binding DespillDetectionWidthVisibility}"
-                                            Value="{Binding DespillDetectionWidth}" />
+                                            Value="{Binding DespillExpansion}" />
 
                                     <TextBlock Grid.Row="3"
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
-                                               Visibility="{Binding DespillDetectionStrengthVisibility}"
-                                               Text="色カブリ判定強度" />
+                                               Text="輪郭補正強度" />
                                     <Slider Grid.Row="3"
                                             Grid.Column="1"
                                             Margin="0,10,0,0"
@@ -494,14 +496,13 @@
                                             Maximum="1"
                                             TickFrequency="0.1"
                                             IsMoveToPointEnabled="True"
-                                            Visibility="{Binding DespillDetectionStrengthVisibility}"
-                                            Value="{Binding DespillDetectionStrength}" />
+                                            Value="{Binding DespillMix}" />
 
                                     <TextBlock Grid.Row="4"
                                                Grid.Column="0"
                                                Margin="0,10,10,0"
                                                VerticalAlignment="Center"
-                                               Text="色カブリ除去強度" />
+                                               Text="輪郭明度補正" />
                                     <Slider Grid.Row="4"
                                             Grid.Column="1"
                                             Margin="0,10,0,0"
@@ -509,71 +510,7 @@
                                             Maximum="1"
                                             TickFrequency="0.1"
                                             IsMoveToPointEnabled="True"
-                                            Value="{Binding DespillStrength}" />
-
-                                    <TextBlock Grid.Row="5"
-                                               Grid.Column="0"
-                                               Margin="0,10,10,0"
-                                               VerticalAlignment="Center"
-                                               Text="輪郭色補正" />
-                                    <CheckBox Grid.Row="5"
-                                              Grid.Column="1"
-                                              Margin="0,10,0,0"
-                                              Content="輪郭色補正を行う"
-                                              Foreground="#E8EEF5"
-                                              IsChecked="{Binding EnableEdgeColorCorrection}" />
-
-                                    <TextBlock Grid.Row="6"
-                                               Grid.Column="0"
-                                               Margin="0,10,10,0"
-                                               VerticalAlignment="Center"
-                                               IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
-                                               Text="輪郭色補正強度" />
-                                    <Slider Grid.Row="6"
-                                            Grid.Column="1"
-                                            Margin="0,10,0,0"
-                                            Minimum="0"
-                                            Maximum="1"
-                                            TickFrequency="0.1"
-                                            IsMoveToPointEnabled="True"
-                                            IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
-                                            Value="{Binding EdgeCorrectionStrength}" />
-
-                                    <TextBlock Grid.Row="7"
-                                               Grid.Column="0"
-                                               Margin="0,10,10,0"
-                                               VerticalAlignment="Center"
-                                               IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
-                                               Text="輪郭代表色" />
-                                    <DockPanel Grid.Row="7"
-                                               Grid.Column="1"
-                                               Margin="0,10,0,8">
-                                        <ToggleButton DockPanel.Dock="Right"
-                                                      Margin="0,0,6,0"
-                                                      IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
-                                                      IsChecked="{Binding IsLineColorEyedropperMode, Mode=OneWay}"
-                                                      Click="LineEyedropperModeButton_OnClick">
-                                            <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.DropperIcon}" />
-                                        </ToggleButton>
-                                        <Button DockPanel.Dock="Right"
-                                                IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
-                                                Click="LineColorPickerButton_OnClick">
-                                            <Image Width="18" Height="18" Source="{x:Static services:ToolbarIconService.PaletteIcon}" />
-                                        </Button>
-                                        <Border DockPanel.Dock="Right"
-                                                Width="24"
-                                                Height="24"
-                                                Margin="0,0,6,0"
-                                                VerticalAlignment="Center"
-                                                CornerRadius="2"
-                                                BorderBrush="#5A6570"
-                                                BorderThickness="1"
-                                                IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
-                                                Background="{Binding LineColorPreviewBrush}" />
-                                        <TextBox Text="{Binding LineColorHex, UpdateSourceTrigger=PropertyChanged}"
-                                                 IsEnabled="{Binding AreEdgeCorrectionControlsEnabled}"
-                                                 Style="{StaticResource InputTextBoxStyle}" />
-                                    </DockPanel>
+                                            Value="{Binding DespillBrightness}" />
                                 </Grid>
                             </GroupBox>
                         </StackPanel>
