@@ -53,6 +53,7 @@
   </ItemGroup>
 
   <Target Name="BuildPythonWorker"
+          Condition="'$(SkipPythonWorkerBuild)' != 'true'"
           BeforeTargets="Build;Publish"
           Inputs="@(PythonWorkerSources)"
           Outputs="$(PythonWorkerExePath)">
@@ -68,6 +69,7 @@
   </Target>
 
   <Target Name="CopyPythonWorkerToOutput"
+          Condition="'$(SkipPythonWorkerBuild)' != 'true'"
           AfterTargets="Build"
           DependsOnTargets="BuildPythonWorker">
     <Delete Files="$(OutDir)python_worker\main.py;$(OutDir)python_worker\main.pyc" ContinueOnError="true" />
@@ -81,6 +83,7 @@
   </Target>
 
   <Target Name="CopyPythonWorkerToPublish"
+          Condition="'$(SkipPythonWorkerBuild)' != 'true'"
           AfterTargets="Publish"
           DependsOnTargets="BuildPythonWorker">
     <RemoveDir Directories="$(PublishDir)python_worker" />

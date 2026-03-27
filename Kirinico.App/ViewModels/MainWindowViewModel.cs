@@ -28,22 +28,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly string _workerTempDirectory;
 
     private readonly CharacterCutoutProcessor _processor;
-    private readonly BatchImageProcessor _batchProcessor;
+    private readonly BatchCoordinator _batchCoordinator;
+    private readonly ImageDocument _imageDocument = new();
+    private readonly PreviewSession _previewSession = new();
     private readonly object _syncRoot = new();
     private readonly DispatcherTimer _seedBlinkTimer;
     private readonly InternalSettings _internalSettings = new();
-
-    private Mat? _sourceImage;
-    private Mat? _backgroundSeedAddMap;
-    private Mat? _latestTrimapMask;
-    private PreResizeCutoutResult? _cachedPreResizeResult;
-    private CutoutResult? _latestResult;
-    private CancellationTokenSource? _renderCts;
-    private int _renderVersion;
     private bool _syncingDimensions;
-    private bool _isDirty;
-    private bool _requiresCoreRender = true;
-    private bool _requiresPresentationRender = true;
     private bool _suspendPreviewInvalidation;
 
     private BitmapSource? _originalImage;
@@ -97,19 +88,6 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private RgbColor? _eyedropperPreviewColor;
     private RgbColor? _coordinateStatusColor;
 
-    private enum PreviewDirtyKind
-    {
-        Trimap,
-        Presentation,
-    }
-
-    private enum PreviewRenderMode
-    {
-        TrimapOnly,
-        PresentationOnly,
-        FullPipeline,
-    }
-
     public MainWindowViewModel()
     {
         _workerTempDirectory = Path.Combine(Path.GetTempPath(), "kirinico", "worker");
@@ -117,9 +95,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             WorkerExecutablePath = Path.Combine(AppContext.BaseDirectory, "python_worker", "Kirinico.PyWorker.exe"),
             WorkingDirectory = AppContext.BaseDirectory,
-            TempDirectory = _workerTempDirectory,
+                TempDirectory = _workerTempDirectory,
         }));
-        _batchProcessor = new BatchImageProcessor(_processor);
+        _batchCoordinator = new BatchCoordinator(new BatchImageProcessor(_processor));
         _seedBlinkTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(420),
@@ -130,6 +108,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         UpdateZoomPercentText();
         UpdateModeState(EditorMode.Hand);
     }
+
+    private Mat? _sourceImage => _imageDocument.SourceImage;
+
+    private Mat? _backgroundSeedAddMap => _imageDocument.BackgroundSeedAddMap;
+
+    private Mat? _latestTrimapMask => _imageDocument.LatestTrimapMask;
+
+    private PreResizeCutoutResult? _cachedPreResizeResult => _imageDocument.CachedPreResizeResult;
+
+    private CutoutResult? _latestResult => _imageDocument.LatestResult;
 
     public IReadOnlyList<int> ZoomPresetOptions { get; } = [10, 50, 100, 200, 500];
 
@@ -704,7 +692,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         get => _autoReprocess;
         set
         {
-            if (SetProperty(ref _autoReprocess, value) && value && _isDirty)
+            if (SetProperty(ref _autoReprocess, value) && value && _previewSession.IsDirty)
             {
                 TryQueueAutoRender(immediate: true);
             }
@@ -806,22 +794,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         lock (_syncRoot)
         {
-            _sourceImage?.Dispose();
-            _sourceImage = loaded.Clone();
-            DisposeLatestTrimapMask();
-            DisposeCachedPreResizeResult();
-            ClearLatestResult();
-            _requiresCoreRender = true;
-            _requiresPresentationRender = true;
-            _isDirty = true;
-
-            _backgroundSeedAddMap?.Dispose();
-            _backgroundSeedAddMap = new Mat(_sourceImage.Rows, _sourceImage.Cols, MatType.CV_8UC1, Scalar.All(0d));
+            _imageDocument.ReplaceSourceImage(loaded.Clone());
+            _previewSession.MarkPendingFullRender();
         }
 
+        var sourceImage = _sourceImage ?? throw new InvalidOperationException("元画像の保持に失敗しました。");
         CurrentFilePath = path;
-        OriginalImage = BitmapSourceFactory.FromBgr(_sourceImage);
-        var topLeftPixel = _sourceImage.At<Vec3b>(0, 0);
+        OriginalImage = BitmapSourceFactory.FromBgr(sourceImage);
+        var topLeftPixel = sourceImage.At<Vec3b>(0, 0);
         SharedViewport.Reset();
         ResetUiParametersForLoadedImage(new RgbColor(topLeftPixel.Item2, topLeftPixel.Item1, topLeftPixel.Item0).ToHex());
 
@@ -1224,17 +1204,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
         try
         {
-            var progress = new Progress<BatchProgress>(report =>
-            {
-                var percent = report.TotalCount == 0 ? 0d : report.CompletedCount * 100d / report.TotalCount;
-                BatchProgressPercent = percent;
-                var statusLine = string.IsNullOrWhiteSpace(report.CurrentFileName)
-                    ? report.StatusText
-                    : $"{report.StatusText}\n{report.CurrentFileName}";
-                BatchStatusText = statusLine;
-            });
-
-            var summary = await _batchProcessor.ProcessAsync(files, BuildParameters(), progress, cancellationToken);
+            var summary = await _batchCoordinator.RunAsync(
+                files,
+                BuildParameters(),
+                update =>
+                {
+                    BatchProgressPercent = update.ProgressPercent;
+                    BatchStatusText = update.StatusText;
+                },
+                cancellationToken);
             var total = summary.Items.Count;
             BatchProgressPercent = 100d;
             BatchStatusText = summary.FailedCount > 0 || summary.SkippedCount > 0
@@ -1249,13 +1227,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
-        _renderCts?.Cancel();
-        _renderCts?.Dispose();
-        _latestTrimapMask?.Dispose();
-        _cachedPreResizeResult?.Dispose();
-        _latestResult?.Dispose();
-        _sourceImage?.Dispose();
-        _backgroundSeedAddMap?.Dispose();
+        _previewSession.Dispose();
+        _imageDocument.Dispose();
         _processor.Dispose();
         _seedBlinkTimer.Stop();
         _seedBlinkTimer.Tick -= OnSeedBlinkTimerTick;
@@ -1373,11 +1346,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _renderCts?.Cancel();
         _processor.CancelPendingMatting();
-        _renderCts?.Dispose();
-        _renderCts = new CancellationTokenSource();
-        var renderVersion = Interlocked.Increment(ref _renderVersion);
+        var ticket = _previewSession.BeginRender();
         IsPreviewBusy = true;
         PreviewProgressPercent = 0d;
         PreviewStageText = mode switch
@@ -1388,7 +1358,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         };
         _statusText = "プレビューを更新しています。";
         OnPropertyChanged(nameof(StatusText));
-        _ = RenderPreviewAsync(_renderCts.Token, renderVersion, immediate ? 0 : 120, mode);
+        _ = RenderPreviewAsync(ticket.Token, ticket.RenderVersion, immediate ? 0 : 120, mode);
     }
 
     private void MarkPreviewDirty(PreviewDirtyKind kind = PreviewDirtyKind.Trimap)
@@ -1396,17 +1366,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         if (kind == PreviewDirtyKind.Trimap)
         {
             DisposeCachedPreResizeResult();
-            _requiresCoreRender = true;
-            _requiresPresentationRender = true;
         }
-        else
-        {
-            _requiresPresentationRender = true;
-        }
+
+        _previewSession.MarkDirty(kind);
 
         if (_suspendPreviewInvalidation)
         {
-            _isDirty = true;
             return;
         }
 
@@ -1415,17 +1380,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _isDirty = true;
         if (AutoReprocess && TryQueueAutoRender(immediate: false))
         {
             return;
         }
 
-        _renderCts?.Cancel();
         _processor.CancelPendingMatting();
-        _renderCts?.Dispose();
-        _renderCts = null;
-        Interlocked.Increment(ref _renderVersion);
+        _previewSession.InvalidateCurrentRender();
         IsPreviewBusy = false;
         PreviewProgressPercent = 0d;
         PreviewStageText = "再処理待ち";
@@ -1440,15 +1401,10 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return false;
         }
 
-        if (_requiresCoreRender)
+        var mode = _previewSession.GetNextRenderMode(_sourceImage is not null, _cachedPreResizeResult is not null);
+        if (mode.HasValue)
         {
-            QueueRender(PreviewRenderMode.FullPipeline, immediate);
-            return true;
-        }
-
-        if (_requiresPresentationRender)
-        {
-            QueueRender(_cachedPreResizeResult is not null ? PreviewRenderMode.PresentationOnly : PreviewRenderMode.FullPipeline, immediate);
+            QueueRender(mode.Value, immediate);
             return true;
         }
 
@@ -1457,7 +1413,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private string GetPendingWorkMessage()
     {
-        if (_requiresCoreRender || _requiresPresentationRender)
+        if (_previewSession.RequiresCoreRender || _previewSession.RequiresPresentationRender)
         {
             return "変更があります。再処理を押してください。";
         }
@@ -1467,8 +1423,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void ClearLatestResult()
     {
-        _latestResult?.Dispose();
-        _latestResult = null;
+        _imageDocument.ClearLatestResult();
         FinalImage = null;
         OnPropertyChanged(nameof(DisplayedResultImage));
         ResultCoordinateScaleX = 1d;
@@ -1477,50 +1432,49 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void DisposeLatestTrimapMask()
     {
-        _latestTrimapMask?.Dispose();
-        _latestTrimapMask = null;
+        _imageDocument.ClearLatestTrimapMask();
     }
 
     private void DisposeCachedPreResizeResult()
     {
-        _cachedPreResizeResult?.Dispose();
-        _cachedPreResizeResult = null;
+        _imageDocument.ClearCachedPreResizeResult();
     }
 
     private void SetLatestTrimapMask(Mat trimapMask)
     {
-        DisposeLatestTrimapMask();
-        _latestTrimapMask = trimapMask;
+        _imageDocument.ReplaceLatestTrimapMask(trimapMask);
     }
 
     private AppSettingsSnapshot CreateSettingsSnapshot() => new()
     {
-        Ui = new AppSettingsSnapshot.UiSettingsSnapshot
-        {
-            BackgroundSpecificationMode = SelectedBackgroundSpecificationMode,
-            BackgroundColorHex = BackgroundColorHex,
-            BackgroundTolerance = BackgroundTolerance,
-            ContourSettingMethod = SelectedContourSettingMethod,
-            ContourTolerance = ContourTolerance,
-            MaxContourWidth = MaxContourWidth,
-            DenoiseStrength = NoiseRemoval,
-            ContourInferenceMethod = SelectedContourInferenceMethod,
-            BackgroundSeeds = CollectSeedSnapshots(),
-            TransparencyCut = TransparencyCut,
-            OpaqueAlphaThreshold = OpaqueAlphaThreshold,
-            DespillExpansion = DespillExpansion,
-            DespillMix = DespillMix,
-            DespillBrightness = DespillBrightness,
-            AutoReprocess = AutoReprocess,
-            ResizeInterpolation = SelectedResizeInterpolation,
-            ScalePercent = ScalePercent,
-            OutputWidth = OutputWidth,
-            OutputHeight = OutputHeight,
-            OutlineEnabled = OutlineEnabled,
-            OutlineColorHex = OutlineColorHex,
-            OutlineThickness = OutlineThickness,
-        },
-        Internal = CloneInternalSettings(_internalSettings),
+        Ui = CaptureUiSettingsSnapshot(),
+        Internal = InternalSettingsCloner.Clone(_internalSettings),
+    };
+
+    private AppSettingsSnapshot.UiSettingsSnapshot CaptureUiSettingsSnapshot() => new()
+    {
+        BackgroundSpecificationMode = SelectedBackgroundSpecificationMode,
+        BackgroundColorHex = BackgroundColorHex,
+        BackgroundTolerance = BackgroundTolerance,
+        ContourSettingMethod = SelectedContourSettingMethod,
+        ContourTolerance = ContourTolerance,
+        MaxContourWidth = MaxContourWidth,
+        DenoiseStrength = NoiseRemoval,
+        ContourInferenceMethod = SelectedContourInferenceMethod,
+        BackgroundSeeds = CollectSeedSnapshots(),
+        TransparencyCut = TransparencyCut,
+        OpaqueAlphaThreshold = OpaqueAlphaThreshold,
+        DespillExpansion = DespillExpansion,
+        DespillMix = DespillMix,
+        DespillBrightness = DespillBrightness,
+        AutoReprocess = AutoReprocess,
+        ResizeInterpolation = SelectedResizeInterpolation,
+        ScalePercent = ScalePercent,
+        OutputWidth = OutputWidth,
+        OutputHeight = OutputHeight,
+        OutlineEnabled = OutlineEnabled,
+        OutlineColorHex = OutlineColorHex,
+        OutlineThickness = OutlineThickness,
     };
 
     private void ResetUiParametersForLoadedImage(string backgroundColorHex)
@@ -1596,7 +1550,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             OutlineThickness = ui.OutlineThickness;
             AutoReprocess = ui.AutoReprocess;
             RestoreSeedSnapshots(ui.BackgroundSeeds);
-            CopyInternalSettings(snapshot.Internal);
+            InternalSettingsCloner.CopyTo(_internalSettings, snapshot.Internal);
         }
         finally
         {
@@ -1613,12 +1567,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _isDirty = true;
-        _renderCts?.Cancel();
+        _previewSession.MarkPendingFullRender();
         _processor.CancelPendingMatting();
-        _renderCts?.Dispose();
-        _renderCts = null;
-        Interlocked.Increment(ref _renderVersion);
+        _previewSession.InvalidateCurrentRender();
         IsPreviewBusy = false;
         PreviewProgressPercent = 0d;
         PreviewStageText = "再処理待ち";
@@ -1635,102 +1586,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         },
     };
 
-    private void CopyInternalSettings(InternalSettings? source)
-    {
-        if (source is null)
-        {
-            return;
-        }
-
-        _internalSettings.Matting.Cf.MaxIters = source.Matting.Cf.MaxIters;
-        _internalSettings.Matting.Cf.Tolerance = source.Matting.Cf.Tolerance;
-        _internalSettings.Matting.Cf.Preconditioner = source.Matting.Cf.Preconditioner;
-        _internalSettings.Matting.Cf.DiscardThreshold = source.Matting.Cf.DiscardThreshold;
-        _internalSettings.Matting.Cf.Shift = source.Matting.Cf.Shift;
-        _internalSettings.Matting.Cf.Epsilon = source.Matting.Cf.Epsilon;
-        _internalSettings.Matting.Cf.Radius = source.Matting.Cf.Radius;
-        _internalSettings.Matting.Knn.MaxIters = source.Matting.Knn.MaxIters;
-        _internalSettings.Matting.Knn.Tolerance = source.Matting.Knn.Tolerance;
-        _internalSettings.Matting.Knn.Preconditioner = source.Matting.Knn.Preconditioner;
-        _internalSettings.Matting.Knn.DiscardThreshold = source.Matting.Knn.DiscardThreshold;
-        _internalSettings.Matting.Knn.Shift = source.Matting.Knn.Shift;
-        _internalSettings.Matting.Knn.Neighbors1 = source.Matting.Knn.Neighbors1;
-        _internalSettings.Matting.Knn.Neighbors2 = source.Matting.Knn.Neighbors2;
-        _internalSettings.Matting.Knn.DistanceWeight1 = source.Matting.Knn.DistanceWeight1;
-        _internalSettings.Matting.Knn.DistanceWeight2 = source.Matting.Knn.DistanceWeight2;
-        _internalSettings.Matting.Knn.Kernel = source.Matting.Knn.Kernel;
-        _internalSettings.Matting.Lkm.MaxIters = source.Matting.Lkm.MaxIters;
-        _internalSettings.Matting.Lkm.Tolerance = source.Matting.Lkm.Tolerance;
-        _internalSettings.Matting.Lkm.Epsilon = source.Matting.Lkm.Epsilon;
-        _internalSettings.Matting.Lkm.Radius = source.Matting.Lkm.Radius;
-
-        _internalSettings.BackgroundThreshold.TbgMin = source.BackgroundThreshold.TbgMin;
-        _internalSettings.BackgroundThreshold.TbgMax = source.BackgroundThreshold.TbgMax;
-        _internalSettings.BackgroundThreshold.TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin;
-        _internalSettings.BackgroundThreshold.TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax;
-        _internalSettings.BackgroundThreshold.BgNoiseMinArea = source.BackgroundThreshold.BgNoiseMinArea;
-        _internalSettings.BackgroundThreshold.BgNoiseMaxHoleArea = source.BackgroundThreshold.BgNoiseMaxHoleArea;
-
-        _internalSettings.Preprocess.DenoiseRadiusMin = source.Preprocess.DenoiseRadiusMin;
-        _internalSettings.Preprocess.DenoiseRadiusMax = source.Preprocess.DenoiseRadiusMax;
-        _internalSettings.Preprocess.DenoiseSigmaMin = source.Preprocess.DenoiseSigmaMin;
-        _internalSettings.Preprocess.DenoiseSigmaMax = source.Preprocess.DenoiseSigmaMax;
-
-        _internalSettings.AlphaColorRestore.AlphaCutMin = source.AlphaColorRestore.AlphaCutMin;
-        _internalSettings.AlphaColorRestore.AlphaCutMax = source.AlphaColorRestore.AlphaCutMax;
-        _internalSettings.AlphaColorRestore.DespillExpand = source.AlphaColorRestore.DespillExpand;
-    }
-
     private List<AppSettingsSnapshot.SeedPointSnapshot> CollectSeedSnapshots()
     {
-        var result = new List<AppSettingsSnapshot.SeedPointSnapshot>();
-        if (_backgroundSeedAddMap is null || _backgroundSeedAddMap.Empty())
-        {
-            return result;
-        }
-
-        var indexer = _backgroundSeedAddMap.GetGenericIndexer<byte>();
-        for (var y = 0; y < _backgroundSeedAddMap.Rows; y++)
-        {
-            for (var x = 0; x < _backgroundSeedAddMap.Cols; x++)
-            {
-                if (indexer[y, x] == 0)
-                {
-                    continue;
-                }
-
-                result.Add(new AppSettingsSnapshot.SeedPointSnapshot
-                {
-                    X = x,
-                    Y = y,
-                });
-            }
-        }
-
-        return result;
+        return _imageDocument.CollectSeedSnapshots();
     }
 
     private void RestoreSeedSnapshots(IReadOnlyList<AppSettingsSnapshot.SeedPointSnapshot>? seeds)
     {
-        if (_backgroundSeedAddMap is null || _backgroundSeedAddMap.Empty())
-        {
-            return;
-        }
-
-        _backgroundSeedAddMap.SetTo(Scalar.All(0d));
-        if (seeds is not null)
-        {
-            foreach (var seed in seeds)
-            {
-                if (seed.X < 0 || seed.Y < 0 || seed.X >= _backgroundSeedAddMap.Cols || seed.Y >= _backgroundSeedAddMap.Rows)
-                {
-                    continue;
-                }
-
-                _backgroundSeedAddMap.Set(seed.Y, seed.X, 255);
-            }
-        }
-
+        _imageDocument.RestoreSeedSnapshots(seeds);
         RefreshEditOverlay();
     }
 
@@ -1743,7 +1606,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 await Task.Delay(delayMs, cancellationToken);
             }
 
-            if (renderVersion != Volatile.Read(ref _renderVersion))
+            if (!_previewSession.IsCurrentVersion(renderVersion))
             {
                 return;
             }
@@ -1759,18 +1622,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                 if (mode is PreviewRenderMode.TrimapOnly or PreviewRenderMode.FullPipeline)
                 {
-                    sourceClone = _sourceImage?.Clone() ?? throw new InvalidOperationException("元画像が読み込まれていません。");
-                    if (_backgroundSeedAddMap is not null)
-                    {
-                        manualMaps = new ManualEditMaps
-                        {
-                            BackgroundSeedAddMap = _backgroundSeedAddMap.Clone(),
-                        };
-                    }
+                    sourceClone = _imageDocument.CloneSourceImage();
+                    manualMaps = _imageDocument.CreateManualEditMapsClone();
                 }
                 else if (_cachedPreResizeResult is not null)
                 {
-                    preResizeCacheClone = _cachedPreResizeResult.Clone();
+                    preResizeCacheClone = _imageDocument.CloneCachedPreResizeResult();
                 }
             }
 
@@ -1782,7 +1639,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 manualMaps?.Dispose();
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
-                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    if (!_previewSession.IsCurrentVersion(renderVersion))
                     {
                         return;
                     }
@@ -1790,13 +1647,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     ClearLatestResult();
                     DisposeLatestTrimapMask();
                     DisposeCachedPreResizeResult();
-                    _requiresCoreRender = true;
-                    _requiresPresentationRender = true;
+                    _previewSession.MarkPendingFullRender();
                     TrimapImage = null;
                     IsPreviewBusy = false;
                     PreviewProgressPercent = 0d;
                     PreviewStageText = "seedなし";
-                    _isDirty = true;
                     _statusText = "背景seedがありません。追加ワンドでseedを置いてください。";
                     OnPropertyChanged(nameof(StatusText));
                 });
@@ -1805,7 +1660,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             var progress = new Progress<ProcessingProgress>(report =>
             {
-                if (renderVersion != Volatile.Read(ref _renderVersion))
+                if (!_previewSession.IsCurrentVersion(renderVersion))
                 {
                     return;
                 }
@@ -1826,7 +1681,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 if (mode == PreviewRenderMode.TrimapOnly)
                 {
                     using var preparedTrimap = await Task.Run(() => _processor.PrepareTrimap(sourceClone!, parameters, manualMaps, progress), cancellationToken);
-                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    if (!_previewSession.IsCurrentVersion(renderVersion))
                     {
                         return;
                     }
@@ -1836,7 +1691,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        if (!_previewSession.IsCurrentVersion(renderVersion))
                         {
                             trimapCache.Dispose();
                             return;
@@ -1846,9 +1701,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         DisposeCachedPreResizeResult();
                         ClearLatestResult();
                         TrimapImage = trimapPreviewBitmap;
-                        _requiresCoreRender = false;
-                        _requiresPresentationRender = true;
-                        _isDirty = true;
+                        _previewSession.MarkTrimapRendered();
                         IsPreviewBusy = false;
                         PreviewProgressPercent = 0d;
                         PreviewStageText = "再処理待ち";
@@ -1863,7 +1716,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 if (mode == PreviewRenderMode.FullPipeline)
                 {
                     using var preparedTrimap = await Task.Run(() => _processor.PrepareTrimap(sourceClone!, parameters, manualMaps, progress), cancellationToken);
-                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    if (!_previewSession.IsCurrentVersion(renderVersion))
                     {
                         return;
                     }
@@ -1873,7 +1726,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        if (!_previewSession.IsCurrentVersion(renderVersion))
                         {
                             interimTrimapCache.Dispose();
                             return;
@@ -1883,14 +1736,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         TrimapImage = interimTrimapBitmap;
                     });
 
-                    if (cancellationToken.IsCancellationRequested || renderVersion != Volatile.Read(ref _renderVersion))
+                    if (cancellationToken.IsCancellationRequested || !_previewSession.IsCurrentVersion(renderVersion))
                     {
                         return;
                     }
 
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        if (!_previewSession.IsCurrentVersion(renderVersion))
                         {
                             return;
                         }
@@ -1903,7 +1756,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     });
 
                     await Task.Delay(PyMattingStartDebounceMs, cancellationToken);
-                    if (cancellationToken.IsCancellationRequested || renderVersion != Volatile.Read(ref _renderVersion))
+                    if (cancellationToken.IsCancellationRequested || !_previewSession.IsCurrentVersion(renderVersion))
                     {
                         return;
                     }
@@ -1914,7 +1767,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         return;
                     }
 
-                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    if (!_previewSession.IsCurrentVersion(renderVersion))
                     {
                         refreshedPreResize.Dispose();
                         return;
@@ -1931,7 +1784,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        if (renderVersion != Volatile.Read(ref _renderVersion))
+                        if (!_previewSession.IsCurrentVersion(renderVersion))
                         {
                             return;
                         }
@@ -1946,7 +1799,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     result = await Task.Run(() => _processor.FinalizeFromPreResize(preResizeCacheClone, parameters, progress), cancellationToken);
                 }
 
-                if (renderVersion != Volatile.Read(ref _renderVersion))
+                if (!_previewSession.IsCurrentVersion(renderVersion))
                 {
                     result.Dispose();
                     refreshedPreResize?.Dispose();
@@ -1965,7 +1818,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
-                    if (renderVersion != Volatile.Read(ref _renderVersion))
+                    if (!_previewSession.IsCurrentVersion(renderVersion))
                     {
                         result.Dispose();
                         return;
@@ -1979,21 +1832,17 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
                     if (refreshedPreResize is not null)
                     {
-                        DisposeCachedPreResizeResult();
-                        _cachedPreResizeResult = refreshedPreResize;
+                        _imageDocument.ReplaceCachedPreResizeResult(refreshedPreResize);
                         refreshedPreResize = null;
                     }
-                    ClearLatestResult();
-                    _latestResult = result;
+                    _imageDocument.ReplaceLatestResult(result);
                     AlphaImage = alphaBitmap;
                     FinalImage = finalBitmap;
                     OnPropertyChanged(nameof(DisplayedResultImage));
                     ResultCoordinateScaleX = resultScaleX;
                     ResultCoordinateScaleY = resultScaleY;
-                    _requiresCoreRender = false;
-                    _requiresPresentationRender = false;
+                    _previewSession.MarkRenderCompleted();
                     IsPreviewBusy = false;
-                    _isDirty = false;
                     PreviewProgressPercent = 0d;
                     PreviewStageText = "待機";
                     _statusText = $"プレビュー更新完了。背景 {result.ResolvedBackgroundColor.ToHex()}  出力 {result.FinalRgba.Width} x {result.FinalRgba.Height}";
@@ -2003,7 +1852,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         catch (OperationCanceledException)
         {
-            if (renderVersion != Volatile.Read(ref _renderVersion))
+            if (!_previewSession.IsCurrentVersion(renderVersion))
             {
                 return;
             }
@@ -2013,7 +1862,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 IsPreviewBusy = false;
                 PreviewProgressPercent = 0d;
                 PreviewStageText = "待機";
-                _statusText = _isDirty ? GetPendingWorkMessage() : GetCurrentModeMessage();
+                _statusText = _previewSession.IsDirty ? GetPendingWorkMessage() : GetCurrentModeMessage();
                 OnPropertyChanged(nameof(StatusText));
             });
         }
@@ -2021,7 +1870,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                if (renderVersion != Volatile.Read(ref _renderVersion))
+                if (!_previewSession.IsCurrentVersion(renderVersion))
                 {
                     return;
                 }
@@ -2037,107 +1886,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private CutoutParameters BuildParameters()
     {
-        var outlineColor = RgbColor.TryParseHex(OutlineColorHex, out var parsedOutline)
-            ? parsedOutline
-            : new RgbColor(0, 0, 0);
-        var internalSettings = CloneInternalSettings(_internalSettings);
-
-        return new CutoutParameters
-        {
-            BackgroundSpecificationMode = SelectedBackgroundSpecificationMode,
-            BackgroundColor = RgbColor.TryParseHex(BackgroundColorHex, out var parsedBackground)
-                ? parsedBackground
-                : new RgbColor(255, 255, 255),
-            BackgroundTolerance = BackgroundTolerance,
-            DenoiseStrength = NoiseRemoval,
-            ContourTolerance = ContourTolerance,
-            DistanceFromBackgroundOnly = SelectedContourSettingMethod == ContourSettingMethod.Width,
-            MaxContourWidthPx = (int)Math.Round(MaxContourWidth * 128d),
-            MattingMethod = SelectedContourInferenceMethod,
-            TransparencyCut = TransparencyCut,
-            OpaqueAlphaThreshold = ConvertUiOpaqueAlphaThresholdToInternal(OpaqueAlphaThreshold),
-            DespillExpansionPx = (int)Math.Round(DespillExpansion * 5d),
-            DespillMix = DespillMix,
-            DespillExpand = internalSettings.AlphaColorRestore.DespillExpand,
-            DespillBrightness = ConvertUiBrightnessToInternal(DespillBrightness),
-            Resize = new ResizeOptions
-            {
-                Mode = ResizeMode.Scale,
-                Interpolation = SelectedResizeInterpolation,
-                ScalePercent = ScalePercent,
-                OutputWidth = OutputWidth,
-                OutputHeight = OutputHeight,
-            },
-            Outline = new OutlineOptions
-            {
-                Enabled = OutlineEnabled,
-                Color = outlineColor,
-                Thickness = OutlineThickness,
-            },
-            Internal = internalSettings,
-        };
-    }
-
-    private static InternalSettings CloneInternalSettings(InternalSettings source)
-    {
-        return new InternalSettings
-        {
-            Matting = new MattingSettings
-            {
-                Cf = new CfMattingSettings
-                {
-                    MaxIters = source.Matting.Cf.MaxIters,
-                    Tolerance = source.Matting.Cf.Tolerance,
-                    Preconditioner = source.Matting.Cf.Preconditioner,
-                    DiscardThreshold = source.Matting.Cf.DiscardThreshold,
-                    Shift = source.Matting.Cf.Shift,
-                    Epsilon = source.Matting.Cf.Epsilon,
-                    Radius = source.Matting.Cf.Radius,
-                },
-                Knn = new KnnMattingSettings
-                {
-                    MaxIters = source.Matting.Knn.MaxIters,
-                    Tolerance = source.Matting.Knn.Tolerance,
-                    Preconditioner = source.Matting.Knn.Preconditioner,
-                    DiscardThreshold = source.Matting.Knn.DiscardThreshold,
-                    Shift = source.Matting.Knn.Shift,
-                    Neighbors1 = source.Matting.Knn.Neighbors1,
-                    Neighbors2 = source.Matting.Knn.Neighbors2,
-                    DistanceWeight1 = source.Matting.Knn.DistanceWeight1,
-                    DistanceWeight2 = source.Matting.Knn.DistanceWeight2,
-                    Kernel = source.Matting.Knn.Kernel,
-                },
-                Lkm = new LkmMattingSettings
-                {
-                    MaxIters = source.Matting.Lkm.MaxIters,
-                    Tolerance = source.Matting.Lkm.Tolerance,
-                    Epsilon = source.Matting.Lkm.Epsilon,
-                    Radius = source.Matting.Lkm.Radius,
-                },
-            },
-                BackgroundThreshold = new BackgroundThresholdSettings
-                {
-                    TbgMin = source.BackgroundThreshold.TbgMin,
-                TbgMax = source.BackgroundThreshold.TbgMax,
-                TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin,
-                TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax,
-                BgNoiseMinArea = source.BackgroundThreshold.BgNoiseMinArea,
-                BgNoiseMaxHoleArea = source.BackgroundThreshold.BgNoiseMaxHoleArea,
-            },
-            Preprocess = new PreprocessSettings
-            {
-                DenoiseRadiusMin = source.Preprocess.DenoiseRadiusMin,
-                DenoiseRadiusMax = source.Preprocess.DenoiseRadiusMax,
-                DenoiseSigmaMin = source.Preprocess.DenoiseSigmaMin,
-                DenoiseSigmaMax = source.Preprocess.DenoiseSigmaMax,
-            },
-            AlphaColorRestore = new AlphaColorRestoreSettings
-            {
-                AlphaCutMin = source.AlphaColorRestore.AlphaCutMin,
-                AlphaCutMax = source.AlphaColorRestore.AlphaCutMax,
-                DespillExpand = source.AlphaColorRestore.DespillExpand,
-            },
-        };
+        return SettingsMapper.BuildCutoutParameters(CaptureUiSettingsSnapshot(), _internalSettings);
     }
 
     private void UpdateModeState(EditorMode mode)
@@ -2362,14 +2111,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         return Math.Log(thickness + 1d, 101d) * 100d;
     }
 
-    private static double ConvertUiBrightnessToInternal(double uiValue)
-        => (Math.Clamp(uiValue, 0d, 1d) * 20d) - 10d;
-
     private static double ConvertInternalBrightnessToUi(double internalValue)
         => Math.Clamp((internalValue + 10d) / 20d, 0d, 1d);
-
-    private static double ConvertUiOpaqueAlphaThresholdToInternal(double uiValue)
-        => 0.8d + (Math.Clamp(uiValue, 0d, 1d) * 0.2d);
 
     private static BitmapSource CreateSeedPreviewBitmap(Mat sourceImage, int x, int y)
     {

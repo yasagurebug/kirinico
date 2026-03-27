@@ -16,23 +16,7 @@ public sealed class CharacterCutoutProcessor : IDisposable
     }
 
     public RgbColor SampleBackgroundColor(Mat sourceBgr, Point center, int radius = 6)
-    {
-        ArgumentNullException.ThrowIfNull(sourceBgr);
-
-        if (sourceBgr.Empty())
-        {
-            return new RgbColor(255, 255, 255);
-        }
-
-        var x = Math.Clamp(center.X - radius, 0, sourceBgr.Width - 1);
-        var y = Math.Clamp(center.Y - radius, 0, sourceBgr.Height - 1);
-        var width = Math.Clamp((radius * 2) + 1, 1, sourceBgr.Width - x);
-        var height = Math.Clamp((radius * 2) + 1, 1, sourceBgr.Height - y);
-
-        using var roi = new Mat(sourceBgr, new Rect(x, y, width, height));
-        var mean = Cv2.Mean(roi);
-        return new RgbColor((byte)Math.Round(mean.Val2), (byte)Math.Round(mean.Val1), (byte)Math.Round(mean.Val0));
-    }
+        => BackgroundSampler.SampleBackgroundColor(sourceBgr, center, radius);
 
     public CutoutResult Process(
         Mat sourceBgr,
@@ -55,9 +39,7 @@ public sealed class CharacterCutoutProcessor : IDisposable
         CutoutParameters parameters,
         ManualEditMaps? manualMaps = null,
         IProgress<ProcessingProgress>? progress = null)
-    {
-        return PrepareTrimapCore(sourceBgr, parameters, manualMaps, progress);
-    }
+        => TrimapBuilder.Prepare(sourceBgr, parameters, manualMaps, progress);
 
     public Mat BuildTrimapPreview(
         Mat sourceBgr,
@@ -88,8 +70,8 @@ public sealed class CharacterCutoutProcessor : IDisposable
         ArgumentNullException.ThrowIfNull(prepared);
         ArgumentNullException.ThrowIfNull(parameters);
 
-        using var alphaMask = CountUnknownPixels(prepared.TrimapMask) < MinUnknownPixelsForMatting
-            ? CreateBinaryAlphaMask(prepared.TrimapMask)
+        using var alphaMask = AlphaPostProcessor.CountUnknownPixels(prepared.TrimapMask) < MinUnknownPixelsForMatting
+            ? AlphaPostProcessor.CreateBinaryAlphaMask(prepared.TrimapMask)
             : EstimateAlphaWithMatting(prepared.ReferenceBgr, prepared.TrimapMask, parameters.MattingMethod, parameters.Internal.Matting, progress);
 
         if (alphaMask is null)
@@ -119,17 +101,16 @@ public sealed class CharacterCutoutProcessor : IDisposable
         ArgumentNullException.ThrowIfNull(parameters);
 
         progress?.Report(new ProcessingProgress(90d, "前景色を復元"));
-        using var restoredStraightBgra = RestoreStraightBgra(
+        using var restoredStraightBgra = AlphaPostProcessor.RestoreStraightBgra(
             preResizeResult.OriginalBgr,
-            preResizeResult.TrimapMask,
             preResizeResult.AlphaMask,
             preResizeResult.ResolvedBackgroundColor,
             parameters);
 
         var targetSize = parameters.Resize.ResolveTargetSize(restoredStraightBgra.Size());
         progress?.Report(new ProcessingProgress(95d, "リサイズと縁取りを適用"));
-        using var resizedStraight = ResizePremultiplied(restoredStraightBgra, targetSize, parameters.Resize.Interpolation);
-        var finalRgba = ApplyOutline(resizedStraight, parameters.Outline);
+        using var resizedStraight = AlphaPostProcessor.ResizePremultiplied(restoredStraightBgra, targetSize, parameters.Resize.Interpolation);
+        var finalRgba = OutlineRenderer.ApplyOutline(resizedStraight, parameters.Outline);
 
         progress?.Report(new ProcessingProgress(100d, "完了"));
         return new CutoutResult(

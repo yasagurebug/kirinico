@@ -1,4 +1,5 @@
 using Kirinico.App.Models;
+using Kirinico.App.Services;
 using Kirinico.Core.Models;
 using Kirinico.Core.Services;
 using OpenCvSharp;
@@ -33,7 +34,7 @@ internal static class CliRunner
             }
 
             using var manualMaps = BuildManualEditMaps(snapshot.Ui, source.Size());
-            var parameters = BuildParameters(snapshot);
+            var parameters = SettingsMapper.BuildCutoutParameters(snapshot);
 
             var outputDirectory = Path.GetDirectoryName(options.OutputPath);
             if (!string.IsNullOrWhiteSpace(outputDirectory))
@@ -102,106 +103,6 @@ internal static class CliRunner
         },
     };
 
-    private static CutoutParameters BuildParameters(AppSettingsSnapshot snapshot)
-    {
-        var ui = snapshot.Ui ?? new AppSettingsSnapshot.UiSettingsSnapshot();
-        var outlineColor = ParseRequiredColor(ui.OutlineColorHex, new RgbColor(0, 0, 0));
-        var internalSettings = CloneInternalSettings(snapshot.Internal ?? new InternalSettings());
-
-        return new CutoutParameters
-        {
-            BackgroundSpecificationMode = ui.BackgroundSpecificationMode,
-            BackgroundColor = ParseRequiredColor(ui.BackgroundColorHex, new RgbColor(255, 255, 255)),
-            BackgroundTolerance = ui.BackgroundTolerance,
-            ContourTolerance = ui.ContourTolerance,
-            DistanceFromBackgroundOnly = ui.ContourSettingMethod == ContourSettingMethod.Width,
-            MaxContourWidthPx = (int)Math.Round(Math.Clamp(ui.MaxContourWidth, 0d, 1d) * 128d),
-            DenoiseStrength = ui.DenoiseStrength,
-            MattingMethod = ui.ContourInferenceMethod,
-            TransparencyCut = ui.TransparencyCut,
-            OpaqueAlphaThreshold = ConvertUiOpaqueAlphaThresholdToInternal(ui.OpaqueAlphaThreshold),
-            DespillExpansionPx = (int)Math.Round(Math.Clamp(ui.DespillExpansion, 0d, 1d) * 5d),
-            DespillMix = Math.Clamp(ui.DespillMix, 0d, 1d),
-            DespillExpand = Math.Clamp(internalSettings.AlphaColorRestore.DespillExpand, 0d, 1d),
-            DespillBrightness = ConvertUiBrightnessToInternal(ui.DespillBrightness),
-            Resize = new ResizeOptions
-            {
-                Mode = ResizeMode.Scale,
-                Interpolation = ui.ResizeInterpolation,
-                ScalePercent = ui.ScalePercent,
-                OutputWidth = Math.Max(0, ui.OutputWidth),
-                OutputHeight = Math.Max(0, ui.OutputHeight),
-            },
-            Outline = new OutlineOptions
-            {
-                Enabled = ui.OutlineEnabled,
-                Color = outlineColor,
-                Thickness = ui.OutlineThickness,
-            },
-            Internal = internalSettings,
-        };
-    }
-
-    private static InternalSettings CloneInternalSettings(InternalSettings source)
-        => new()
-        {
-            Matting = new MattingSettings
-            {
-                Cf = new CfMattingSettings
-                {
-                    MaxIters = source.Matting.Cf.MaxIters,
-                    Tolerance = source.Matting.Cf.Tolerance,
-                    Preconditioner = source.Matting.Cf.Preconditioner,
-                    DiscardThreshold = source.Matting.Cf.DiscardThreshold,
-                    Shift = source.Matting.Cf.Shift,
-                    Epsilon = source.Matting.Cf.Epsilon,
-                    Radius = source.Matting.Cf.Radius,
-                },
-                Knn = new KnnMattingSettings
-                {
-                    MaxIters = source.Matting.Knn.MaxIters,
-                    Tolerance = source.Matting.Knn.Tolerance,
-                    Preconditioner = source.Matting.Knn.Preconditioner,
-                    DiscardThreshold = source.Matting.Knn.DiscardThreshold,
-                    Shift = source.Matting.Knn.Shift,
-                    Neighbors1 = source.Matting.Knn.Neighbors1,
-                    Neighbors2 = source.Matting.Knn.Neighbors2,
-                    DistanceWeight1 = source.Matting.Knn.DistanceWeight1,
-                    DistanceWeight2 = source.Matting.Knn.DistanceWeight2,
-                    Kernel = source.Matting.Knn.Kernel,
-                },
-                Lkm = new LkmMattingSettings
-                {
-                    MaxIters = source.Matting.Lkm.MaxIters,
-                    Tolerance = source.Matting.Lkm.Tolerance,
-                    Epsilon = source.Matting.Lkm.Epsilon,
-                    Radius = source.Matting.Lkm.Radius,
-                },
-            },
-            BackgroundThreshold = new BackgroundThresholdSettings
-            {
-                TbgMin = source.BackgroundThreshold.TbgMin,
-                TbgMax = source.BackgroundThreshold.TbgMax,
-                TfgDeltaMin = source.BackgroundThreshold.TfgDeltaMin,
-                TfgDeltaMax = source.BackgroundThreshold.TfgDeltaMax,
-                BgNoiseMinArea = source.BackgroundThreshold.BgNoiseMinArea,
-                BgNoiseMaxHoleArea = source.BackgroundThreshold.BgNoiseMaxHoleArea,
-            },
-            Preprocess = new PreprocessSettings
-            {
-                DenoiseRadiusMin = source.Preprocess.DenoiseRadiusMin,
-                DenoiseRadiusMax = source.Preprocess.DenoiseRadiusMax,
-                DenoiseSigmaMin = source.Preprocess.DenoiseSigmaMin,
-                DenoiseSigmaMax = source.Preprocess.DenoiseSigmaMax,
-            },
-            AlphaColorRestore = new AlphaColorRestoreSettings
-            {
-                AlphaCutMin = source.AlphaColorRestore.AlphaCutMin,
-                AlphaCutMax = source.AlphaColorRestore.AlphaCutMax,
-                DespillExpand = source.AlphaColorRestore.DespillExpand,
-            },
-        };
-
     private static ManualEditMaps? BuildManualEditMaps(AppSettingsSnapshot.UiSettingsSnapshot? ui, OpenCvSharp.Size sourceSize)
     {
         if (ui is null || ui.BackgroundSpecificationMode != BackgroundSpecificationMode.ManualSeed)
@@ -228,18 +129,6 @@ internal static class CliRunner
             BackgroundSeedAddMap = seedMap,
         };
     }
-
-    private static RgbColor ParseRequiredColor(string? hex, RgbColor fallback)
-        => RgbColor.TryParseHex(hex, out var color) ? color : fallback;
-
-    private static RgbColor? ParseOptionalColor(string? hex)
-        => RgbColor.TryParseHex(hex, out var color) ? color : null;
-
-    private static double ConvertUiBrightnessToInternal(double uiValue)
-        => (Math.Clamp(uiValue, 0d, 1d) * 20d) - 10d;
-
-    private static double ConvertUiOpaqueAlphaThresholdToInternal(double uiValue)
-        => 0.8d + (Math.Clamp(uiValue, 0d, 1d) * 0.2d);
 
     private static void WriteUsage()
     {
