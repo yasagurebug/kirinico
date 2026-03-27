@@ -43,6 +43,8 @@ public sealed class AppSettingsSnapshot
 
         public bool AutoReprocess { get; set; } = true;
 
+        public bool FastPreviewEnabled { get; set; } = true;
+
         public ResizeInterpolationMode ResizeInterpolation { get; set; } = ResizeInterpolationMode.Lanczos4;
 
         public double ScalePercent { get; set; } = 100d;

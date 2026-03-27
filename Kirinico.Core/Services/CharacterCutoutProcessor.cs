@@ -87,6 +87,42 @@ public sealed class CharacterCutoutProcessor : IDisposable
             prepared.ResolvedBackgroundColor);
     }
 
+    public PreResizeCutoutResult? EstimateAlphaPreviewFromTrimap(
+        TrimapPreparationResult prepared,
+        CutoutParameters parameters,
+        double scale,
+        IProgress<ProcessingProgress>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(prepared);
+        ArgumentNullException.ThrowIfNull(parameters);
+
+        if (scale <= 0d || scale >= 1d)
+        {
+            return EstimateAlphaFromTrimap(prepared, parameters, progress);
+        }
+
+        var previewSize = ResolvePreviewSize(prepared.TrimapMask.Size(), scale);
+        using var previewReference = ResizePreviewReference(prepared.ReferenceBgr, previewSize);
+        using var previewTrimap = ResizePreviewTrimap(prepared.TrimapMask, previewSize);
+        progress?.Report(new ProcessingProgress(60d, "高速プレビュー用 alpha を推定"));
+        using var previewAlpha = AlphaPostProcessor.CountUnknownPixels(previewTrimap) < MinUnknownPixelsForMatting
+            ? AlphaPostProcessor.CreateBinaryAlphaMask(previewTrimap)
+            : EstimateAlphaWithMatting(previewReference, previewTrimap, parameters.MattingMethod, parameters.Internal.Matting, progress);
+
+        if (previewAlpha is null)
+        {
+            return null;
+        }
+
+        using var upscaledAlpha = UpscalePreviewAlpha(previewAlpha, prepared.TrimapMask.Size());
+        progress?.Report(new ProcessingProgress(80d, "高速プレビューを拡大"));
+        return new PreResizeCutoutResult(
+            prepared.TrimapMask.Clone(),
+            upscaledAlpha.Clone(),
+            prepared.OriginalBgr.Clone(),
+            prepared.ResolvedBackgroundColor);
+    }
+
     public void CancelPendingMatting()
     {
         _alphaEstimator.CancelCurrentRequest();
@@ -123,6 +159,83 @@ public sealed class CharacterCutoutProcessor : IDisposable
     public void Dispose()
     {
         _alphaEstimator.Dispose();
+    }
+
+    private static Size ResolvePreviewSize(Size sourceSize, double scale)
+    {
+        var width = Math.Clamp((int)Math.Round(sourceSize.Width * scale), 1, sourceSize.Width);
+        var height = Math.Clamp((int)Math.Round(sourceSize.Height * scale), 1, sourceSize.Height);
+        return new Size(width, height);
+    }
+
+    private static Mat ResizePreviewReference(Mat referenceBgr, Size targetSize)
+    {
+        if (referenceBgr.Size() == targetSize)
+        {
+            return referenceBgr.Clone();
+        }
+
+        var preview = new Mat();
+        Cv2.Resize(referenceBgr, preview, targetSize, 0d, 0d, InterpolationFlags.Area);
+        return preview;
+    }
+
+    private static Mat ResizePreviewTrimap(Mat trimapMask, Size targetSize)
+    {
+        if (trimapMask.Size() == targetSize)
+        {
+            return trimapMask.Clone();
+        }
+
+        var preview = new Mat(targetSize.Height, targetSize.Width, MatType.CV_8UC1, new Scalar(128));
+        var sourceIndexer = trimapMask.GetGenericIndexer<byte>();
+        var previewIndexer = preview.GetGenericIndexer<byte>();
+        for (var previewY = 0; previewY < targetSize.Height; previewY++)
+        {
+            var sourceY0 = (int)Math.Floor(previewY * trimapMask.Rows / (double)targetSize.Height);
+            var sourceY1 = Math.Max(sourceY0 + 1, (int)Math.Ceiling((previewY + 1) * trimapMask.Rows / (double)targetSize.Height));
+            sourceY1 = Math.Min(trimapMask.Rows, sourceY1);
+
+            for (var previewX = 0; previewX < targetSize.Width; previewX++)
+            {
+                var sourceX0 = (int)Math.Floor(previewX * trimapMask.Cols / (double)targetSize.Width);
+                var sourceX1 = Math.Max(sourceX0 + 1, (int)Math.Ceiling((previewX + 1) * trimapMask.Cols / (double)targetSize.Width));
+                sourceX1 = Math.Min(trimapMask.Cols, sourceX1);
+
+                var allBackground = true;
+                var allForeground = true;
+                for (var sourceY = sourceY0; sourceY < sourceY1; sourceY++)
+                {
+                    for (var sourceX = sourceX0; sourceX < sourceX1; sourceX++)
+                    {
+                        var value = sourceIndexer[sourceY, sourceX];
+                        allBackground &= value == 0;
+                        allForeground &= value == 255;
+                        if (!allBackground && !allForeground)
+                        {
+                            goto classify;
+                        }
+                    }
+                }
+
+            classify:
+                previewIndexer[previewY, previewX] = allBackground ? (byte)0 : allForeground ? (byte)255 : (byte)128;
+            }
+        }
+
+        return preview;
+    }
+
+    private static Mat UpscalePreviewAlpha(Mat alphaMask, Size targetSize)
+    {
+        if (alphaMask.Size() == targetSize)
+        {
+            return alphaMask.Clone();
+        }
+
+        var upscaled = new Mat();
+        Cv2.Resize(alphaMask, upscaled, targetSize, 0d, 0d, InterpolationFlags.Linear);
+        return upscaled;
     }
 
     private static void ValidateSource(Mat sourceBgr)

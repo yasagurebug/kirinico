@@ -16,7 +16,7 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
     <AssemblyVersion>$(Version).0</AssemblyVersion>
     <AutoFileVersionSuffix>$([System.DateTime]::UtcNow.ToString("HHmm"))</AutoFileVersionSuffix>
     <FileVersion>$(Version).$(AutoFileVersionSuffix)</FileVersion>

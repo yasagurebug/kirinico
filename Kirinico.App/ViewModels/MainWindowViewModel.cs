@@ -24,6 +24,7 @@ namespace Kirinico.App.ViewModels;
 public sealed class MainWindowViewModel : ObservableObject, IDisposable
 {
     private const string ResultViewerBackgroundHelpText = "ダブルクリックで背景色を変更";
+    private const double FastPreviewScale = 0.25d;
     private const int PyMattingStartDebounceMs = 500;
     private readonly string _workerTempDirectory;
 
@@ -34,6 +35,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private readonly object _syncRoot = new();
     private readonly DispatcherTimer _seedBlinkTimer;
     private readonly InternalSettings _internalSettings = new();
+    private CancellationTokenSource? _presentationRefreshCts;
+    private int _presentationRefreshVersion;
     private bool _syncingDimensions;
     private bool _suspendPreviewInvalidation;
 
@@ -78,6 +81,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private string _outlineThicknessText = "1.0";
     private EditorMode _selectedEditorMode = EditorMode.Hand;
     private bool _autoReprocess = true;
+    private bool _fastPreviewEnabled = true;
+    private bool _isFastPreviewActive;
     private string _zoomPercentText = "100%";
     private double _resultCoordinateScaleX = 1d;
     private double _resultCoordinateScaleY = 1d;
@@ -699,6 +704,22 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public bool FastPreviewEnabled
+    {
+        get => _fastPreviewEnabled;
+        set
+        {
+            if (SetProperty(ref _fastPreviewEnabled, value)
+                && !value
+                && _isFastPreviewActive
+                && AutoReprocess
+                && _sourceImage is not null)
+            {
+                QueueRender(PreviewRenderMode.FullPipeline, immediate: true, allowFastPreview: false);
+            }
+        }
+    }
+
     public string ZoomPercentText
     {
         get => _zoomPercentText;
@@ -822,6 +843,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SaveCurrentImageAsync(string path)
     {
+        await EnsureFullQualityResultAsync();
         if (_latestResult is null)
         {
             return;
@@ -839,6 +861,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public async Task SaveRawAlphaMaskAsync(string path)
     {
+        await EnsureFullQualityResultAsync();
         var alphaMask = _latestResult?.AlphaMask ?? _cachedPreResizeResult?.AlphaMask;
         if (alphaMask is null)
         {
@@ -865,7 +888,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return;
         }
 
-        QueueRender(PreviewRenderMode.FullPipeline, immediate: true);
+        QueueRender(PreviewRenderMode.FullPipeline, immediate: true, allowFastPreview: false);
     }
 
     public void CycleFinalBackground()
@@ -1339,15 +1362,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(StatusText));
     }
 
-    private void QueueRender(PreviewRenderMode mode, bool immediate = false)
+    private void QueueRender(PreviewRenderMode mode, bool immediate = false, bool allowFastPreview = true)
     {
         if (_sourceImage is null)
         {
             return;
         }
 
+        CancelPendingPresentationRefresh();
         _processor.CancelPendingMatting();
-        var ticket = _previewSession.BeginRender();
+        var ticket = _previewSession.BeginRender(mode);
         IsPreviewBusy = true;
         PreviewProgressPercent = 0d;
         PreviewStageText = mode switch
@@ -1358,17 +1382,16 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         };
         _statusText = "プレビューを更新しています。";
         OnPropertyChanged(nameof(StatusText));
-        _ = RenderPreviewAsync(ticket.Token, ticket.RenderVersion, immediate ? 0 : 120, mode);
+        _ = RenderPreviewAsync(ticket.Token, ticket.RenderVersion, immediate ? 0 : 120, mode, allowFastPreview);
     }
 
     private void MarkPreviewDirty(PreviewDirtyKind kind = PreviewDirtyKind.Trimap)
     {
         if (kind == PreviewDirtyKind.Trimap)
         {
+            CancelPendingPresentationRefresh();
             DisposeCachedPreResizeResult();
         }
-
-        _previewSession.MarkDirty(kind);
 
         if (_suspendPreviewInvalidation)
         {
@@ -1379,6 +1402,18 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             return;
         }
+
+        if (kind == PreviewDirtyKind.Presentation
+            && _previewSession.IsRendering
+            && _previewSession.ActiveRenderMode == PreviewRenderMode.FullPipeline)
+        {
+            QueuePresentationRefreshFromCache();
+            _statusText = "PyMatting を継続しながら後補正を更新します。";
+            OnPropertyChanged(nameof(StatusText));
+            return;
+        }
+
+        _previewSession.MarkDirty(kind);
 
         if (AutoReprocess && TryQueueAutoRender(immediate: false))
         {
@@ -1424,6 +1459,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private void ClearLatestResult()
     {
         _imageDocument.ClearLatestResult();
+        SetFastPreviewActive(false);
         FinalImage = null;
         OnPropertyChanged(nameof(DisplayedResultImage));
         ResultCoordinateScaleX = 1d;
@@ -1468,6 +1504,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         DespillMix = DespillMix,
         DespillBrightness = DespillBrightness,
         AutoReprocess = AutoReprocess,
+        FastPreviewEnabled = FastPreviewEnabled,
         ResizeInterpolation = SelectedResizeInterpolation,
         ScalePercent = ScalePercent,
         OutputWidth = OutputWidth,
@@ -1497,6 +1534,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             DespillMix = defaults.DespillMix;
             DespillBrightness = defaults.DespillBrightness;
             AutoReprocess = defaults.AutoReprocess;
+            FastPreviewEnabled = defaults.FastPreviewEnabled;
             SelectedResizeInterpolation = defaults.ResizeInterpolation;
             OutlineEnabled = defaults.OutlineEnabled;
             OutlineColorHex = defaults.OutlineColorHex;
@@ -1549,6 +1587,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             OutlineColorHex = ui.OutlineColorHex;
             OutlineThickness = ui.OutlineThickness;
             AutoReprocess = ui.AutoReprocess;
+            FastPreviewEnabled = ui.FastPreviewEnabled;
             RestoreSeedSnapshots(ui.BackgroundSeeds);
             InternalSettingsCloner.CopyTo(_internalSettings, snapshot.Internal);
         }
@@ -1597,7 +1636,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         RefreshEditOverlay();
     }
 
-    private async Task RenderPreviewAsync(CancellationToken cancellationToken, int renderVersion, int delayMs, PreviewRenderMode mode)
+    private async Task RenderPreviewAsync(
+        CancellationToken cancellationToken,
+        int renderVersion,
+        int delayMs,
+        PreviewRenderMode mode,
+        bool allowFastPreview)
     {
         try
         {
@@ -1741,6 +1785,65 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         return;
                     }
 
+                    if (allowFastPreview && FastPreviewEnabled)
+                    {
+                        using var previewPreResize = await Task.Run(
+                            () => _processor.EstimateAlphaPreviewFromTrimap(preparedTrimap, parameters, FastPreviewScale, progress),
+                            cancellationToken);
+                        if (previewPreResize is null)
+                        {
+                            return;
+                        }
+
+                        if (!_previewSession.IsCurrentVersion(renderVersion))
+                        {
+                            return;
+                        }
+
+                        using var previewResult = await Task.Run(
+                            () => _processor.FinalizeFromPreResize(previewPreResize, parameters, progress),
+                            cancellationToken);
+                        if (!_previewSession.IsCurrentVersion(renderVersion))
+                        {
+                            return;
+                        }
+
+                        var previewAlphaBitmap = BitmapSourceFactory.FromAlphaPreview(previewResult.AlphaMask);
+                        var previewFinalBitmap = BitmapSourceFactory.FromBgra(previewResult.FinalRgba);
+                        var previewResultScaleX = _sourceImage is null ? 1d : previewResult.FinalRgba.Width / (double)_sourceImage.Width;
+                        var previewResultScaleY = _sourceImage is null ? 1d : previewResult.FinalRgba.Height / (double)_sourceImage.Height;
+
+                        await Application.Current.Dispatcher.InvokeAsync(() =>
+                        {
+                            if (!_previewSession.IsCurrentVersion(renderVersion))
+                            {
+                                return;
+                            }
+
+                            _imageDocument.ReplaceLatestResult(new CutoutResult(
+                                previewResult.TrimapMask.Clone(),
+                                previewResult.AlphaMask.Clone(),
+                                previewResult.FinalRgba.Clone(),
+                                previewResult.ResolvedBackgroundColor));
+                            AlphaImage = previewAlphaBitmap;
+                            FinalImage = previewFinalBitmap;
+                            OnPropertyChanged(nameof(DisplayedResultImage));
+                            ResultCoordinateScaleX = previewResultScaleX;
+                            ResultCoordinateScaleY = previewResultScaleY;
+                            SetFastPreviewActive(true);
+                            IsPreviewBusy = true;
+                            PreviewProgressPercent = 80d;
+                            PreviewStageText = "高速プレビュー中";
+                            _statusText = "プレビュー更新中: 高速プレビューを表示しています。";
+                            OnPropertyChanged(nameof(StatusText));
+                        });
+
+                        if (cancellationToken.IsCancellationRequested || !_previewSession.IsCurrentVersion(renderVersion))
+                        {
+                            return;
+                        }
+                    }
+
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                     {
                         if (!_previewSession.IsCurrentVersion(renderVersion))
@@ -1773,7 +1876,13 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         return;
                     }
 
-                    result = await Task.Run(() => _processor.FinalizeFromPreResize(refreshedPreResize, parameters, progress), cancellationToken);
+                    CutoutParameters latestParameters;
+                    lock (_syncRoot)
+                    {
+                        latestParameters = BuildParameters();
+                    }
+
+                    result = await Task.Run(() => _processor.FinalizeFromPreResize(refreshedPreResize, latestParameters, progress), cancellationToken);
                 }
                 else
                 {
@@ -1835,13 +1944,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                         _imageDocument.ReplaceCachedPreResizeResult(refreshedPreResize);
                         refreshedPreResize = null;
                     }
-                    _imageDocument.ReplaceLatestResult(result);
-                    AlphaImage = alphaBitmap;
-                    FinalImage = finalBitmap;
+                        _imageDocument.ReplaceLatestResult(result);
+                        SetFastPreviewActive(false);
+                        AlphaImage = alphaBitmap;
+                        FinalImage = finalBitmap;
                     OnPropertyChanged(nameof(DisplayedResultImage));
                     ResultCoordinateScaleX = resultScaleX;
                     ResultCoordinateScaleY = resultScaleY;
                     _previewSession.MarkRenderCompleted();
+                    if (AutoReprocess && TryQueueAutoRender(immediate: false))
+                    {
+                        return;
+                    }
+
                     IsPreviewBusy = false;
                     PreviewProgressPercent = 0d;
                     PreviewStageText = "待機";
@@ -1859,6 +1974,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
+                _previewSession.MarkRenderInterrupted(mode);
                 IsPreviewBusy = false;
                 PreviewProgressPercent = 0d;
                 PreviewStageText = "待機";
@@ -1875,13 +1991,121 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     return;
                 }
 
+                _previewSession.MarkRenderInterrupted(mode);
                 IsPreviewBusy = false;
                 PreviewProgressPercent = 0d;
+                SetFastPreviewActive(false);
                 PreviewStageText = "エラー";
                 _statusText = $"プレビュー更新失敗: {exception.Message}";
                 OnPropertyChanged(nameof(StatusText));
             });
         }
+    }
+
+    private async Task EnsureFullQualityResultAsync()
+    {
+        if (_sourceImage is null || !_isFastPreviewActive)
+        {
+            return;
+        }
+
+        _processor.CancelPendingMatting();
+        var ticket = _previewSession.BeginRender(PreviewRenderMode.FullPipeline);
+        IsPreviewBusy = true;
+        PreviewProgressPercent = 0d;
+        PreviewStageText = "保存前に最終品質を再計算";
+        _statusText = "保存前に最終品質を再計算しています。";
+        OnPropertyChanged(nameof(StatusText));
+        await RenderPreviewAsync(ticket.Token, ticket.RenderVersion, 0, PreviewRenderMode.FullPipeline, allowFastPreview: false);
+
+        if (_isFastPreviewActive)
+        {
+            throw new InvalidOperationException("最終品質のプレビュー生成に失敗したため保存できません。");
+        }
+    }
+
+    private void SetFastPreviewActive(bool isActive)
+    {
+        _isFastPreviewActive = isActive;
+    }
+
+    private void QueuePresentationRefreshFromCache()
+    {
+        CancelPendingPresentationRefresh();
+
+        PreResizeCutoutResult? cachedPreResizeClone;
+        CutoutParameters parameters;
+        lock (_syncRoot)
+        {
+            cachedPreResizeClone = _imageDocument.CloneCachedPreResizeResult();
+            parameters = BuildParameters();
+        }
+
+        if (cachedPreResizeClone is null)
+        {
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _presentationRefreshCts = cts;
+        var version = Interlocked.Increment(ref _presentationRefreshVersion);
+        _ = RenderPresentationRefreshFromCacheAsync(cachedPreResizeClone, parameters, version, cts.Token);
+    }
+
+    private async Task RenderPresentationRefreshFromCacheAsync(
+        PreResizeCutoutResult cachedPreResizeClone,
+        CutoutParameters parameters,
+        int version,
+        CancellationToken cancellationToken)
+    {
+        using (cachedPreResizeClone)
+        {
+            try
+            {
+                var result = await Task.Run(() => _processor.FinalizeFromPreResize(cachedPreResizeClone, parameters), cancellationToken);
+                if (cancellationToken.IsCancellationRequested || version != Volatile.Read(ref _presentationRefreshVersion))
+                {
+                    result.Dispose();
+                    return;
+                }
+
+                var alphaBitmap = BitmapSourceFactory.FromAlphaPreview(result.AlphaMask);
+                var finalBitmap = BitmapSourceFactory.FromBgra(result.FinalRgba);
+                var resultScaleX = _sourceImage is null ? 1d : result.FinalRgba.Width / (double)_sourceImage.Width;
+                var resultScaleY = _sourceImage is null ? 1d : result.FinalRgba.Height / (double)_sourceImage.Height;
+
+                await Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    if (cancellationToken.IsCancellationRequested
+                        || version != Volatile.Read(ref _presentationRefreshVersion)
+                        || !_previewSession.IsRendering
+                        || _previewSession.ActiveRenderMode != PreviewRenderMode.FullPipeline)
+                    {
+                        result.Dispose();
+                        return;
+                    }
+
+                    _imageDocument.ReplaceLatestResult(result);
+                    AlphaImage = alphaBitmap;
+                    FinalImage = finalBitmap;
+                    OnPropertyChanged(nameof(DisplayedResultImage));
+                    ResultCoordinateScaleX = resultScaleX;
+                    ResultCoordinateScaleY = resultScaleY;
+                    _statusText = "PyMatting を継続しながら後補正を更新しました。";
+                    OnPropertyChanged(nameof(StatusText));
+                });
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+    }
+
+    private void CancelPendingPresentationRefresh()
+    {
+        _presentationRefreshCts?.Cancel();
+        _presentationRefreshCts?.Dispose();
+        _presentationRefreshCts = null;
     }
 
     private CutoutParameters BuildParameters()

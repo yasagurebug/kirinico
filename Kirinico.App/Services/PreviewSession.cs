@@ -26,10 +26,32 @@ internal sealed class PreviewSession : IDisposable
 
     public bool RequiresPresentationRender { get; private set; } = true;
 
-    public PreviewTicket BeginRender()
+    public bool IsRendering { get; private set; }
+
+    public PreviewRenderMode? ActiveRenderMode { get; private set; }
+
+    public PreviewTicket BeginRender(PreviewRenderMode mode)
     {
         CancelPending(incrementVersion: false);
         _renderCts = new CancellationTokenSource();
+        IsRendering = true;
+        ActiveRenderMode = mode;
+        switch (mode)
+        {
+            case PreviewRenderMode.FullPipeline:
+                RequiresCoreRender = false;
+                RequiresPresentationRender = false;
+                break;
+            case PreviewRenderMode.PresentationOnly:
+                RequiresPresentationRender = false;
+                break;
+            case PreviewRenderMode.TrimapOnly:
+                RequiresCoreRender = false;
+                RequiresPresentationRender = false;
+                break;
+        }
+
+        IsDirty = RequiresCoreRender || RequiresPresentationRender;
         return new PreviewTicket(_renderCts.Token, Interlocked.Increment(ref _renderVersion));
     }
 
@@ -77,6 +99,8 @@ internal sealed class PreviewSession : IDisposable
 
     public void MarkTrimapRendered()
     {
+        IsRendering = false;
+        ActiveRenderMode = null;
         RequiresCoreRender = false;
         RequiresPresentationRender = true;
         IsDirty = true;
@@ -84,9 +108,31 @@ internal sealed class PreviewSession : IDisposable
 
     public void MarkRenderCompleted()
     {
-        RequiresCoreRender = false;
-        RequiresPresentationRender = false;
-        IsDirty = false;
+        IsRendering = false;
+        ActiveRenderMode = null;
+        IsDirty = RequiresCoreRender || RequiresPresentationRender;
+    }
+
+    public void MarkRenderInterrupted(PreviewRenderMode mode)
+    {
+        IsRendering = false;
+        ActiveRenderMode = null;
+        switch (mode)
+        {
+            case PreviewRenderMode.FullPipeline:
+                RequiresCoreRender = true;
+                RequiresPresentationRender = true;
+                break;
+            case PreviewRenderMode.PresentationOnly:
+                RequiresPresentationRender = true;
+                break;
+            case PreviewRenderMode.TrimapOnly:
+                RequiresCoreRender = true;
+                RequiresPresentationRender = true;
+                break;
+        }
+
+        IsDirty = RequiresCoreRender || RequiresPresentationRender;
     }
 
     public bool IsCurrentVersion(int renderVersion) => renderVersion == Volatile.Read(ref _renderVersion);
@@ -106,6 +152,8 @@ internal sealed class PreviewSession : IDisposable
         _renderCts?.Cancel();
         _renderCts?.Dispose();
         _renderCts = null;
+        IsRendering = false;
+        ActiveRenderMode = null;
         if (incrementVersion)
         {
             Interlocked.Increment(ref _renderVersion);

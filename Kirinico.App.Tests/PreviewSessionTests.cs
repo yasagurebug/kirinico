@@ -26,4 +26,20 @@ public sealed class PreviewSessionTests
         Assert.True(session.IsDirty);
         Assert.Equal(PreviewRenderMode.PresentationOnly, session.GetNextRenderMode(hasSourceImage: true, hasCachedPreResizeResult: true));
     }
+
+    [Fact]
+    public void PresentationDirtyDuringFullPipeline_QueuesPresentationOnlyAfterCompletion()
+    {
+        using var session = new PreviewSession();
+        session.MarkPendingFullRender();
+
+        session.BeginRender(PreviewRenderMode.FullPipeline);
+        session.MarkDirty(PreviewDirtyKind.Presentation);
+        session.MarkRenderCompleted();
+
+        Assert.True(session.IsDirty);
+        Assert.False(session.RequiresCoreRender);
+        Assert.True(session.RequiresPresentationRender);
+        Assert.Equal(PreviewRenderMode.PresentationOnly, session.GetNextRenderMode(hasSourceImage: true, hasCachedPreResizeResult: true));
+    }
 }

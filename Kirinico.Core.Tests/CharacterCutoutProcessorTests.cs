@@ -167,6 +167,27 @@ public sealed class CharacterCutoutProcessorTests
     }
 
     [Fact]
+    public void EstimateAlphaPreviewFromTrimap_RestoresAlphaToOriginalSize()
+    {
+        using var original = new Mat(20, 20, MatType.CV_8UC3, new Scalar(255, 255, 255));
+        using var reference = original.Clone();
+        using var trimap = new Mat(20, 20, MatType.CV_8UC1, new Scalar(128));
+        using var prepared = new TrimapPreparationResult(original.Clone(), reference.Clone(), trimap.Clone(), new RgbColor(255, 255, 255));
+        using var estimator = new CountingAlphaMatteEstimator();
+        using var processor = CreateProcessor(estimator);
+
+        using var result = processor.EstimateAlphaPreviewFromTrimap(
+            prepared,
+            CreateParameters(backgroundSpecificationMode: BackgroundSpecificationMode.ColorRange),
+            0.25d);
+
+        Assert.NotNull(result);
+        Assert.Equal(trimap.Size(), result!.AlphaMask.Size());
+        Assert.Equal(original.Size(), result.OriginalBgr.Size());
+        Assert.Equal(1, estimator.CallCount);
+    }
+
+    [Fact]
     public void FinalizeFromPreResize_ClampsNearOpaqueAlphaToFullOpacity()
     {
         using var original = new Mat(1, 1, MatType.CV_8UC3, new Scalar(10, 40, 80));
